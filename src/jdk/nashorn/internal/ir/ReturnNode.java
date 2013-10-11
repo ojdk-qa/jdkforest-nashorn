@@ -27,32 +27,32 @@ package jdk.nashorn.internal.ir;
 
 import static jdk.nashorn.internal.parser.TokenType.RETURN;
 import static jdk.nashorn.internal.parser.TokenType.YIELD;
+
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation for RETURN or YIELD statements.
  */
 @Immutable
-public class ReturnNode extends Node {
+public class ReturnNode extends Statement {
     /** Optional expression. */
-    private final Node expression;
+    private final Expression expression;
 
     /**
      * Constructor
      *
-     * @param source     the source
+     * @param lineNumber line number
      * @param token      token
      * @param finish     finish
      * @param expression expression to return
      */
-    public ReturnNode(final Source source, final long token, final int finish, final Node expression) {
-        super(source, token, finish);
+    public ReturnNode(final int lineNumber, final long token, final int finish, final Expression expression) {
+        super(lineNumber, token, finish);
         this.expression = expression;
     }
 
-    private ReturnNode(final ReturnNode returnNode, final Node expression) {
+    private ReturnNode(final ReturnNode returnNode, final Expression expression) {
         super(returnNode);
         this.expression = expression;
     }
@@ -87,10 +87,10 @@ public class ReturnNode extends Node {
     }
 
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterReturnNode(this)) {
             if (expression != null) {
-                return visitor.leaveReturnNode(setExpression(expression.accept(visitor)));
+                return visitor.leaveReturnNode(setExpression((Expression)expression.accept(visitor)));
             }
             return visitor.leaveReturnNode(this);
         }
@@ -101,9 +101,9 @@ public class ReturnNode extends Node {
 
     @Override
     public void toString(final StringBuilder sb) {
-        sb.append(isYield() ? "yield" : "return ");
-
+        sb.append(isYield() ? "yield" : "return");
         if (expression != null) {
+            sb.append(' ');
             expression.toString(sb);
         }
     }
@@ -112,7 +112,7 @@ public class ReturnNode extends Node {
      * Get the expression this node returns
      * @return return expression, or null if void return
      */
-    public Node getExpression() {
+    public Expression getExpression() {
         return expression;
     }
 
@@ -121,7 +121,7 @@ public class ReturnNode extends Node {
      * @param expression new expression, or null if void return
      * @return new or same return node
      */
-    public ReturnNode setExpression(final Node expression) {
+    public ReturnNode setExpression(final Expression expression) {
         if (this.expression == expression) {
             return this;
         }

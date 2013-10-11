@@ -25,11 +25,6 @@
 
 package jdk.nashorn.internal.ir;
 
-import static jdk.nashorn.internal.codegen.CompilerConstants.LITERAL_PREFIX;
-import static jdk.nashorn.internal.codegen.CompilerConstants.TEMP_PREFIX;
-import static jdk.nashorn.internal.ir.Symbol.IS_CONSTANT;
-import static jdk.nashorn.internal.ir.Symbol.IS_TEMP;
-
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -52,7 +47,7 @@ import jdk.nashorn.internal.runtime.linker.LinkerCallSite;
  * IR representation for function (or script.)
  */
 @Immutable
-public final class FunctionNode extends LexicalContextNode implements Flags<FunctionNode> {
+public final class FunctionNode extends LexicalContextExpression implements Flags<FunctionNode> {
 
     /** Type used for all FunctionNodes */
     public static final Type FUNCTION_TYPE = Type.typeFor(ScriptFunction.class);
@@ -90,10 +85,16 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         /** method has been emitted to bytecode */
         EMITTED
     }
+    /** Source of entity. */
+    private final Source source;
 
     /** External function identifier. */
     @Ignore
     private final IdentNode ident;
+
+    /** Parsed version of functionNode */
+    @Ignore
+    private final FunctionNode snapshot;
 
     /** The body of the function node */
     private final Block body;
@@ -127,8 +128,17 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
     @Ignore
     private final EnumSet<CompilationState> compilationState;
 
+    @Ignore
+    private final Compiler.Hints hints;
+
+    /** Properties of this object assigned in this function */
+    @Ignore
+    private HashSet<String> thisProperties;
+
     /** Function flags. */
     private final int flags;
+
+    private final int lineNumber;
 
     /** Is anonymous function flag. */
     public static final int IS_ANONYMOUS                = 1 << 0;
@@ -151,6 +161,10 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
 
     /** Does a nested function contain eval? If it does, then all variables in this function might be get/set by it. */
     public static final int HAS_NESTED_EVAL = 1 << 6;
+
+    /** Does this function have any blocks that create a scope? This is used to determine if the function needs to
+     * have a local variable slot for the scope symbol. */
+    public static final int HAS_SCOPE_BLOCK = 1 << 7;
 
     /**
      * Flag this function as one that defines the identifier "arguments" as a function parameter or nested function
@@ -176,6 +190,9 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
     /** Does this function have nested declarations? */
     public static final int HAS_FUNCTION_DECLARATIONS   = 1 << 13;
 
+    /** Can this function be specialized? */
+    public static final int CAN_SPECIALIZE              = 1 << 14;
+
     /** Does this function or any nested functions contain an eval? */
     private static final int HAS_DEEP_EVAL = HAS_EVAL | HAS_NESTED_EVAL;
 
@@ -196,6 +213,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
      * Constructor
      *
      * @param source     the source
+     * @param lineNumber line number
      * @param token      token
      * @param finish     finish
      * @param firstToken first token of the funtion node (including the function declaration)
@@ -208,6 +226,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
      */
     public FunctionNode(
         final Source source,
+        final int lineNumber,
         final long token,
         final int finish,
         final long firstToken,
@@ -217,47 +236,130 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         final List<IdentNode> parameters,
         final FunctionNode.Kind kind,
         final int flags) {
-        super(source, token, finish);
+        super(token, finish);
 
-        this.ident             = ident;
-        this.name              = name;
-        this.kind              = kind;
-        this.parameters        = parameters;
-        this.firstToken        = firstToken;
-        this.lastToken         = token;
-        this.namespace         = namespace;
-        this.compilationState  = EnumSet.of(CompilationState.INITIALIZED);
-        this.declaredSymbols   = new HashSet<>();
-        this.flags             = flags;
-        this.compileUnit       = null;
-        this.body              = null;
+        this.source           = source;
+        this.lineNumber       = lineNumber;
+        this.ident            = ident;
+        this.name             = name;
+        this.kind             = kind;
+        this.parameters       = parameters;
+        this.firstToken       = firstToken;
+        this.lastToken        = token;
+        this.namespace        = namespace;
+        this.compilationState = EnumSet.of(CompilationState.INITIALIZED);
+        this.declaredSymbols  = new HashSet<>();
+        this.flags            = flags;
+        this.compileUnit      = null;
+        this.body             = null;
+        this.snapshot         = null;
+        this.hints            = null;
     }
 
-    private FunctionNode(final FunctionNode functionNode, final long lastToken, final int flags, final Type returnType, final CompileUnit compileUnit, final EnumSet<CompilationState> compilationState, final Block body) {
+    private FunctionNode(
+        final FunctionNode functionNode,
+        final long lastToken,
+        final int flags,
+        final String name,
+        final Type returnType,
+        final CompileUnit compileUnit,
+        final EnumSet<CompilationState> compilationState,
+        final Block body,
+        final List<IdentNode> parameters,
+        final FunctionNode snapshot,
+        final Compiler.Hints hints) {
         super(functionNode);
-        this.flags = flags;
-        this.returnType = returnType;
-        this.compileUnit = compileUnit;
-        this.lastToken = lastToken;
+        this.lineNumber       = functionNode.lineNumber;
+        this.flags            = flags;
+        this.name             = name;
+        this.returnType       = returnType;
+        this.compileUnit      = compileUnit;
+        this.lastToken        = lastToken;
         this.compilationState = compilationState;
-        this.body  = body;
+        this.body             = body;
+        this.parameters       = parameters;
+        this.snapshot         = snapshot;
+        this.hints            = hints;
 
         // the fields below never change - they are final and assigned in constructor
-        this.name = functionNode.name;
-        this.ident = functionNode.ident;
-        this.namespace = functionNode.namespace;
+        this.source          = functionNode.source;
+        this.ident           = functionNode.ident;
+        this.namespace       = functionNode.namespace;
         this.declaredSymbols = functionNode.declaredSymbols;
-        this.kind  = functionNode.kind;
-        this.parameters = functionNode.parameters;
-        this.firstToken = functionNode.firstToken;
+        this.kind            = functionNode.kind;
+        this.firstToken      = functionNode.firstToken;
+        this.thisProperties  = functionNode.thisProperties;
     }
 
     @Override
-    public Node accept(final LexicalContext lc, final NodeVisitor visitor) {
+    public Node accept(final LexicalContext lc, final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterFunctionNode(this)) {
             return visitor.leaveFunctionNode(setBody(lc, (Block)body.accept(visitor)));
         }
         return this;
+    }
+
+    /**
+     * Get the source for this function
+     * @return the source
+     */
+    public Source getSource() {
+        return source;
+    }
+
+    /**
+     * Returns the line number.
+     * @return the line number.
+     */
+    public int getLineNumber() {
+        return lineNumber;
+    }
+
+    /**
+     * Get the version of this function node's code as it looked upon construction
+     * i.e typically parsed and nothing else
+     * @return initial version of function node
+     */
+    public FunctionNode getSnapshot() {
+        return snapshot;
+    }
+
+    /**
+     * Throw away the snapshot, if any, to save memory. Used when heuristic
+     * determines that a method is not worth specializing
+     *
+     * @param lc lexical context
+     * @return new function node if a snapshot was present, now with snapsnot null
+     */
+    public FunctionNode clearSnapshot(final LexicalContext lc) {
+        if (this.snapshot == null) {
+            return this;
+        }
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, null, hints));
+    }
+
+    /**
+     * Take a snapshot of this function node at a given point in time
+     * and store it in the function node
+     * @param lc lexical context
+     * @return function node
+     */
+    public FunctionNode snapshot(final LexicalContext lc) {
+        if (this.snapshot == this) {
+            return this;
+        }
+        if (isProgram() || parameters.isEmpty()) {
+            return this; //never specialize anything that won't be recompiled
+        }
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, this, hints));
+    }
+
+    /**
+     * Can this function node be regenerated with more specific type args?
+     * @return true if specialization is possible
+     */
+    public boolean canSpecialize() {
+        return snapshot != null && getFlag(CAN_SPECIALIZE);
     }
 
     /**
@@ -302,12 +404,33 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
      * @return function node or a new one if state was changed
      */
     public FunctionNode setState(final LexicalContext lc, final CompilationState state) {
-        if (this.compilationState.equals(state)) {
+        if (this.compilationState.contains(state)) {
             return this;
         }
         final EnumSet<CompilationState> newState = EnumSet.copyOf(this.compilationState);
         newState.add(state);
-        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, returnType, compileUnit, newState, body));
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, newState, body, parameters, snapshot, hints));
+    }
+
+    /**
+     * Get any compiler hints that may associated with the function
+     * @return compiler hints
+     */
+    public Compiler.Hints getHints() {
+        return this.hints == null ? Compiler.Hints.EMPTY : hints;
+    }
+
+    /**
+     * Set compiler hints for this function
+     * @param lc    lexical context
+     * @param hints compiler hints
+     * @return new function if hints changed
+     */
+    public FunctionNode setHints(final LexicalContext lc, final Compiler.Hints hints) {
+        if (this.hints == hints) {
+            return this;
+        }
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     /**
@@ -319,20 +442,6 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         return namespace.uniqueName(base);
     }
 
-    /**
-     * Create a virtual symbol for a literal.
-     *
-     * @param literalNode Primary node to use symbol.
-     *
-     * @return Symbol used.
-     */
-    public Symbol newLiteral(final LiteralNode<?> literalNode) {
-        final String uname = uniqueName(LITERAL_PREFIX.symbolName());
-        final Symbol symbol = new Symbol(uname, IS_CONSTANT, literalNode.getType());
-        literalNode.setSymbol(symbol);
-
-        return symbol;
-    }
 
     @Override
     public void toString(final StringBuilder sb) {
@@ -374,7 +483,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         if (this.flags == flags) {
             return this;
         }
-        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, returnType, compileUnit, compilationState, body));
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     @Override
@@ -431,16 +540,17 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
     /**
      * Check if this function's generated Java method needs a {@code callee} parameter. Functions that need access to
      * their parent scope, functions that reference themselves, and non-strict functions that need an Arguments object
-     * (since it exposes {@code arguments.callee} property) will need to have a callee parameter.
+     * (since it exposes {@code arguments.callee} property) will need to have a callee parameter. We also return true
+     * for split functions to make sure symbols slots are the same in the main and split methods.
      *
      * @return true if the function's generated Java method needs a {@code callee} parameter.
      */
     public boolean needsCallee() {
-        return needsParentScope() || needsSelfSymbol() || (needsArguments() && !isStrict());
+        return needsParentScope() || needsSelfSymbol() || isSplit() || (needsArguments() && !isStrict());
     }
 
     /**
-     * Get the identifier for this function
+     * Get the identifier for this function, this is its symbol.
      * @return the identifier as an IdentityNode
      */
     public IdentNode getIdent() {
@@ -483,7 +593,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         if(this.body == body) {
             return this;
         }
-        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, returnType, compileUnit, compilationState, body));
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags | (body.needsScope() ? FunctionNode.HAS_SCOPE_BLOCK : 0), name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     /**
@@ -525,6 +635,33 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
     }
 
     /**
+     * Register a property assigned to the this object in this function.
+     * @param key the property name
+     */
+    public void addThisProperty(final String key) {
+        if (thisProperties == null) {
+            thisProperties = new HashSet<>();
+        }
+        thisProperties.add(key);
+    }
+
+    /**
+     * Get the number of properties assigned to the this object in this function.
+     * @return number of properties
+     */
+    public int countThisProperties() {
+        return thisProperties == null ? 0 : thisProperties.size();
+    }
+
+    /**
+     * Returns true if any of the blocks in this function create their own scope.
+     * @return true if any of the blocks in this function create their own scope.
+     */
+    public boolean hasScopeBlock() {
+        return getFlag(HAS_SCOPE_BLOCK);
+    }
+
+    /**
      * Return the kind of this function
      * @see FunctionNode.Kind
      * @return the kind
@@ -551,7 +688,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         if (this.lastToken == lastToken) {
             return this;
         }
-        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, returnType, compileUnit, compilationState, body));
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     /**
@@ -560,6 +697,20 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
      */
     public String getName() {
         return name;
+    }
+
+
+    /**
+     * Set the internal name for this function
+     * @param lc    lexical context
+     * @param name new name
+     * @return new function node if changed, otherwise the same
+     */
+    public FunctionNode setName(final LexicalContext lc, final String name) {
+        if (this.name.equals(name)) {
+            return this;
+        }
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     /**
@@ -599,13 +750,17 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
     }
 
     /**
-     * Get a specialized type for an identity, if one exists
-     * @param node node to check specialized type for
-     * @return null if no specialization exists, otherwise type
+     * Reset the compile unit used to compile this function
+     * @see Compiler
+     * @param  lc lexical context
+     * @param  parameters the compile unit
+     * @return function node or a new one if state was changed
      */
-    @SuppressWarnings("static-method")
-    public Type getSpecializedType(final IdentNode node) {
-        return null; //TODO implement specialized types later
+    public FunctionNode setParameters(final LexicalContext lc, final List<IdentNode> parameters) {
+        if (this.parameters == parameters) {
+            return this;
+        }
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     /**
@@ -662,6 +817,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         if (this.returnType == returnType) {
             return this;
         }
+        final Type type = Type.widest(this.returnType, returnType.isObject() ? Type.OBJECT : returnType);
         return Node.replaceInLexicalContext(
             lc,
             this,
@@ -669,12 +825,14 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
                 this,
                 lastToken,
                 flags,
-                Type.widest(this.returnType, returnType.isObject() ?
-                    Type.OBJECT :
-                    returnType),
+                name,
+                type,
                 compileUnit,
                 compilationState,
-                body));
+                body.setReturnType(type),
+                parameters,
+                snapshot,
+                hints));
     }
 
     /**
@@ -705,7 +863,7 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
         if (this.compileUnit == compileUnit) {
             return this;
         }
-        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, returnType, compileUnit, compilationState, body));
+        return Node.replaceInLexicalContext(lc, this, new FunctionNode(this, lastToken, flags, name, returnType, compileUnit, compilationState, body, parameters, snapshot, hints));
     }
 
     /**
@@ -717,19 +875,6 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
      *
      * @return Symbol used.
      */
-    public Symbol ensureSymbol(final Block block, final Type type, final Node node) {
-        Symbol symbol = node.getSymbol();
-
-        // If no symbol already present.
-        if (symbol == null) {
-            final String uname = uniqueName(TEMP_PREFIX.symbolName());
-            symbol = new Symbol(uname, IS_TEMP, type);
-            block.putSymbol(uname, symbol);
-            node.setSymbol(symbol);
-        }
-
-        return symbol;
-    }
 
     /**
      * Get the symbol for a compiler constant, or null if not available (yet)
@@ -739,5 +884,4 @@ public final class FunctionNode extends LexicalContextNode implements Flags<Func
     public Symbol compilerConstant(final CompilerConstants cc) {
         return body.getExistingSymbol(cc.symbolName());
     }
-
 }

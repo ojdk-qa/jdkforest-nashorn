@@ -28,8 +28,11 @@ package jdk.nashorn.internal.objects;
 import jdk.nashorn.internal.objects.annotations.Attribute;
 import jdk.nashorn.internal.objects.annotations.Constructor;
 import jdk.nashorn.internal.objects.annotations.Function;
+import jdk.nashorn.internal.objects.annotations.Property;
 import jdk.nashorn.internal.objects.annotations.ScriptClass;
+import jdk.nashorn.internal.objects.annotations.Where;
 import jdk.nashorn.internal.runtime.JSType;
+import jdk.nashorn.internal.runtime.PropertyMap;
 import jdk.nashorn.internal.runtime.ScriptObject;
 import jdk.nashorn.internal.runtime.arrays.ArrayData;
 
@@ -38,7 +41,16 @@ import jdk.nashorn.internal.runtime.arrays.ArrayData;
  */
 @ScriptClass("Uint8ClampedArray")
 public final class NativeUint8ClampedArray extends ArrayBufferView {
-    private static final int BYTES_PER_ELEMENT = 1;
+    /**
+     * The size in bytes of each element in the array.
+     */
+    @Property(attributes = Attribute.NOT_ENUMERABLE | Attribute.NOT_WRITABLE | Attribute.NOT_CONFIGURABLE, where = Where.CONSTRUCTOR)
+    public static final int BYTES_PER_ELEMENT = 1;
+
+    // initialized by nasgen
+    @SuppressWarnings("unused")
+    private static PropertyMap $nasgenmap$;
+
     private static final Factory FACTORY = new Factory(BYTES_PER_ELEMENT) {
         @Override
         public ArrayBufferView construct(final NativeArrayBuffer buffer, final int byteOffset, final int length) {
@@ -106,6 +118,11 @@ public final class NativeUint8ClampedArray extends ArrayBufferView {
     }
 
     @Override
+    public String getClassName() {
+        return "Uint8ClampedArray";
+    }
+
+    @Override
     protected Factory factory() {
         return FACTORY;
     }
@@ -148,7 +165,7 @@ public final class NativeUint8ClampedArray extends ArrayBufferView {
     }
 
     @Override
-    protected ScriptObject getPrototype() {
-        return Global.instance().getUint8ClampedArrayPrototype();
+    protected ScriptObject getPrototype(final Global global) {
+        return global.getUint8ClampedArrayPrototype();
     }
 }

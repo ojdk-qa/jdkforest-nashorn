@@ -27,18 +27,17 @@ package jdk.nashorn.internal.ir;
 
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * Node represents a var/let declaration.
  */
 @Immutable
-public final class VarNode extends Node implements Assignment<IdentNode> {
+public final class VarNode extends Statement implements Assignment<IdentNode> {
     /** Var name. */
     private final IdentNode name;
 
     /** Initialization expression. */
-    private final Node init;
+    private final Expression init;
 
     /** Is this a var statement (as opposed to a "var" in a for loop statement) */
     private final int flags;
@@ -54,17 +53,17 @@ public final class VarNode extends Node implements Assignment<IdentNode> {
     /**
      * Constructor
      *
-     * @param source the source
-     * @param token  token
-     * @param finish finish
-     * @param name   name of variable
-     * @param init   init node or null if just a declaration
+     * @param lineNumber line number
+     * @param token      token
+     * @param finish     finish
+     * @param name       name of variable
+     * @param init       init node or null if just a declaration
      */
-    public VarNode(final Source source, final long token, final int finish, final IdentNode name, final Node init) {
-        this(source, token, finish, name, init, IS_STATEMENT);
+    public VarNode(final int lineNumber, final long token, final int finish, final IdentNode name, final Expression init) {
+        this(lineNumber, token, finish, name, init, IS_STATEMENT);
     }
 
-    private VarNode(final VarNode varNode, final IdentNode name, final Node init, final int flags) {
+    private VarNode(final VarNode varNode, final IdentNode name, final Expression init, final int flags) {
         super(varNode);
         this.name = init == null ? name : name.setIsInitializedHere();
         this.init = init;
@@ -74,15 +73,15 @@ public final class VarNode extends Node implements Assignment<IdentNode> {
     /**
      * Constructor
      *
-     * @param source the source
-     * @param token  token
-     * @param finish finish
-     * @param name   name of variable
-     * @param init   init node or null if just a declaration
-     * @param flags  flags
+     * @param lineNumber line number
+     * @param token      token
+     * @param finish     finish
+     * @param name       name of variable
+     * @param init       init node or null if just a declaration
+     * @param flags      flags
      */
-    public VarNode(final Source source, final long token, final int finish, final IdentNode name, final Node init, final int flags) {
-        super(source, token, finish);
+    public VarNode(final int lineNumber, final long token, final int finish, final IdentNode name, final Expression init, final int flags) {
+        super(lineNumber, token, finish);
 
         this.name  = init == null ? name : name.setIsInitializedHere();
         this.init  = init;
@@ -100,12 +99,12 @@ public final class VarNode extends Node implements Assignment<IdentNode> {
     }
 
     @Override
-    public Node setAssignmentDest(IdentNode n) {
+    public VarNode setAssignmentDest(IdentNode n) {
         return setName(n);
     }
 
     @Override
-    public Node getAssignmentSource() {
+    public Expression getAssignmentSource() {
         return isAssignment() ? getInit() : null;
     }
 
@@ -122,11 +121,11 @@ public final class VarNode extends Node implements Assignment<IdentNode> {
      * @param visitor IR navigating visitor.
      */
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterVarNode(this)) {
-            final IdentNode newName = (IdentNode)name.accept(visitor);
-            final Node      newInit = init == null ? null : init.accept(visitor);
-            final VarNode   newThis;
+            final IdentNode  newName = (IdentNode)name.accept(visitor);
+            final Expression newInit = init == null ? null : (Expression)init.accept(visitor);
+            final VarNode    newThis;
             if (name != newName || init != newInit) {
                 newThis = new VarNode(this, newName, newInit, flags);
             } else {
@@ -152,7 +151,7 @@ public final class VarNode extends Node implements Assignment<IdentNode> {
      * If this is an assignment of the form {@code var x = init;}, get the init part.
      * @return the expression to initialize the variable to, null if just a declaration
      */
-    public Node getInit() {
+    public Expression getInit() {
         return init;
     }
 
@@ -161,7 +160,7 @@ public final class VarNode extends Node implements Assignment<IdentNode> {
      * @param init new initialization expression
      * @return a node equivalent to this one except for the requested change.
      */
-    public VarNode setInit(final Node init) {
+    public VarNode setInit(final Expression init) {
         if (this.init == init) {
             return this;
         }

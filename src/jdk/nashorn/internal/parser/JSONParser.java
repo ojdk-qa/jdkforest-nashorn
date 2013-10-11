@@ -35,6 +35,7 @@ import static jdk.nashorn.internal.parser.TokenType.STRING;
 
 import java.util.ArrayList;
 import java.util.List;
+import jdk.nashorn.internal.ir.Expression;
 import jdk.nashorn.internal.ir.LiteralNode;
 import jdk.nashorn.internal.ir.Node;
 import jdk.nashorn.internal.ir.ObjectNode;
@@ -54,10 +55,9 @@ public class JSONParser extends AbstractParser {
      * Constructor
      * @param source  the source
      * @param errors  the error manager
-     * @param strict  are we in strict mode
      */
-    public JSONParser(final Source source, final ErrorManager errors, final boolean strict) {
-        super(source, errors, strict);
+    public JSONParser(final Source source, final ErrorManager errors) {
+        super(source, errors, false);
     }
 
     /**
@@ -135,6 +135,7 @@ public class JSONParser extends AbstractParser {
                 return ch == '\"';
             }
 
+            // ECMA 15.12.1.1 The JSON Lexical Grammar - JSONWhiteSpace
             @Override
             protected boolean isWhitespace(final char ch) {
                 return Lexer.isJsonWhitespace(ch);
@@ -143,6 +144,99 @@ public class JSONParser extends AbstractParser {
             @Override
             protected boolean isEOL(final char ch) {
                 return Lexer.isJsonEOL(ch);
+            }
+
+            // ECMA 15.12.1.1 The JSON Lexical Grammar - JSONNumber
+            @Override
+            protected void scanNumber() {
+                // Record beginning of number.
+                final int startPosition = position;
+                // Assume value is a decimal.
+                TokenType valueType = TokenType.DECIMAL;
+
+                // floating point can't start with a "." with no leading digit before
+                if (ch0 == '.') {
+                    error(Lexer.message("json.invalid.number"), STRING, position, limit);
+                }
+
+                // First digit of number.
+                int digit = convertDigit(ch0, 10);
+
+                // skip first digit
+                skip(1);
+
+                if (digit != 0) {
+                    // Skip over remaining digits.
+                    while (convertDigit(ch0, 10) != -1) {
+                        skip(1);
+                    }
+                }
+
+                if (ch0 == '.' || ch0 == 'E' || ch0 == 'e') {
+                    // Must be a double.
+                    if (ch0 == '.') {
+                        // Skip period.
+                        skip(1);
+
+                        boolean mantissa = false;
+                        // Skip mantissa.
+                        while (convertDigit(ch0, 10) != -1) {
+                            mantissa = true;
+                            skip(1);
+                        }
+
+                        if (! mantissa) {
+                            // no digit after "."
+                            error(Lexer.message("json.invalid.number"), STRING, position, limit);
+                        }
+                    }
+
+                    // Detect exponent.
+                    if (ch0 == 'E' || ch0 == 'e') {
+                        // Skip E.
+                        skip(1);
+                        // Detect and skip exponent sign.
+                        if (ch0 == '+' || ch0 == '-') {
+                            skip(1);
+                        }
+                        boolean exponent = false;
+                        // Skip exponent.
+                        while (convertDigit(ch0, 10) != -1) {
+                            exponent = true;
+                            skip(1);
+                        }
+
+                        if (! exponent) {
+                            // no digit after "E"
+                            error(Lexer.message("json.invalid.number"), STRING, position, limit);
+                        }
+                    }
+
+                    valueType = TokenType.FLOATING;
+                }
+
+                // Add number token.
+                add(valueType, startPosition);
+            }
+
+            // ECMA 15.12.1.1 The JSON Lexical Grammar - JSONEscapeCharacter
+            @Override
+            protected boolean isEscapeCharacter(final char ch) {
+                switch (ch) {
+                    case '"':
+                    case '/':
+                    case '\\':
+                    case 'b':
+                    case 'f':
+                    case 'n':
+                    case 'r':
+                    case 't':
+                    // could be unicode escape
+                    case 'u':
+                        return true;
+                    default:
+                        return false;
+                }
             }
         };
 
@@ -181,7 +275,7 @@ public class JSONParser extends AbstractParser {
      * Parse a JSON literal from the token stream
      * @return the JSON literal as a Node
      */
-    private Node jsonLiteral() {
+    private Expression jsonLiteral() {
         final long literalToken = token;
 
         switch (type) {
@@ -193,13 +287,13 @@ public class JSONParser extends AbstractParser {
             return getLiteral();
         case FALSE:
             next();
-            return LiteralNode.newInstance(source, literalToken, finish, false);
+            return LiteralNode.newInstance(literalToken, finish, false);
         case TRUE:
             next();
-            return LiteralNode.newInstance(source, literalToken, finish, true);
+            return LiteralNode.newInstance(literalToken, finish, true);
         case NULL:
             next();
-            return LiteralNode.newInstance(source, literalToken, finish);
+            return LiteralNode.newInstance(literalToken, finish);
         case LBRACKET:
             return arrayLiteral();
         case LBRACE:
@@ -218,7 +312,7 @@ public class JSONParser extends AbstractParser {
 
             if (value instanceof Number) {
                 next();
-                return new UnaryNode(source, literalToken, LiteralNode.newInstance(source, realToken, finish, (Number)value));
+                return new UnaryNode(literalToken, LiteralNode.newInstance(realToken, finish, (Number)value));
             }
 
             throw error(AbstractParser.message("expected", "number", type.getNameOrType()));
@@ -233,7 +327,7 @@ public class JSONParser extends AbstractParser {
      * Parse an array literal from the token stream
      * @return the array literal as a Node
      */
-    private Node arrayLiteral() {
+    private LiteralNode<Expression[]> arrayLiteral() {
         // Unlike JavaScript array literals, elison is not permitted in JSON.
 
         // Capture LBRACKET token.
@@ -241,20 +335,24 @@ public class JSONParser extends AbstractParser {
         // LBRACKET tested in caller.
         next();
 
-        Node result = null;
+        LiteralNode<Expression[]> result = null;
         // Prepare to accummulating elements.
-        final List<Node> elements = new ArrayList<>();
+        final List<Expression> elements = new ArrayList<>();
 
 loop:
         while (true) {
             switch (type) {
             case RBRACKET:
                 next();
-                result = LiteralNode.newInstance(source, arrayToken, finish, elements);
+                result = LiteralNode.newInstance(arrayToken, finish, elements);
                 break loop;
 
             case COMMARIGHT:
                 next();
+                // check for trailing comma - not allowed in JSON
+                if (type == RBRACKET) {
+                    throw error(AbstractParser.message("trailing.comma.in.json", type.getNameOrType()));
+                }
                 break;
 
             default:
@@ -275,14 +373,14 @@ loop:
      * Parse an object literal from the token stream
      * @return the object literal as a Node
      */
-    private Node objectLiteral() {
+    private ObjectNode objectLiteral() {
         // Capture LBRACE token.
         final long objectToken = token;
         // LBRACE tested in caller.
         next();
 
         // Prepare to accumulate elements.
-        final List<Node> elements = new ArrayList<>();
+        final List<PropertyNode> elements = new ArrayList<>();
 
         // Create a block for the object literal.
 loop:
@@ -294,11 +392,15 @@ loop:
 
             case COMMARIGHT:
                 next();
+                // check for trailing comma - not allowed in JSON
+                if (type == RBRACE) {
+                    throw error(AbstractParser.message("trailing.comma.in.json", type.getNameOrType()));
+                }
                 break;
 
             default:
                 // Get and add the next property.
-                final Node property = propertyAssignment();
+                final PropertyNode property = propertyAssignment();
                 elements.add(property);
 
                 // Comma between property assigments is mandatory in JSON.
@@ -310,14 +412,14 @@ loop:
         }
 
         // Construct new object literal.
-        return new ObjectNode(source, objectToken, finish, elements);
+        return new ObjectNode(objectToken, finish, elements);
     }
 
     /**
      * Parse a property assignment from the token stream
      * @return the property assignment as a Node
      */
-    private Node propertyAssignment() {
+    private PropertyNode propertyAssignment() {
         // Capture firstToken.
         final long propertyToken = token;
         LiteralNode<?> name = null;
@@ -330,8 +432,8 @@ loop:
 
         if (name != null) {
             expect(COLON);
-            final Node value = jsonLiteral();
-            return new PropertyNode(source, propertyToken, value.getFinish(), name, value, null, null);
+            final Expression value = jsonLiteral();
+            return new PropertyNode(propertyToken, value.getFinish(), name, value, null, null);
         }
 
         // Raise an error.

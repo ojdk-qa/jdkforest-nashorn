@@ -54,18 +54,43 @@ public class LexicalContext {
 
     /**
      * Set the flags for a lexical context node on the stack. Does not
-     * replace the flags, but rather adds to them
+     * replace the flags, but rather adds to them.
      *
      * @param node  node
      * @param flag  new flag to set
      */
     public void setFlag(final LexicalContextNode node, final int flag) {
         if (flag != 0) {
+            // Use setBlockNeedsScope() instead
+            assert !(flag == Block.NEEDS_SCOPE && node instanceof Block);
+
             for (int i = sp - 1; i >= 0; i--) {
                 if (stack[i] == node) {
                     flags[i] |= flag;
-                    //System.err.println("Setting flag " + node + " " + flag);
                     return;
+                }
+            }
+        }
+        assert false;
+    }
+
+    /**
+     * Marks the block as one that creates a scope. Note that this method must
+     * be used instead of {@link #setFlag(LexicalContextNode, int)} with
+     * {@link Block#NEEDS_SCOPE} because it atomically also sets the
+     * {@link FunctionNode#HAS_SCOPE_BLOCK} flag on the block's containing
+     * function.
+     * @param block the block that needs to be marked as creating a scope.
+     */
+    public void setBlockNeedsScope(final Block block) {
+        for (int i = sp - 1; i >= 0; i--) {
+            if (stack[i] == block) {
+                flags[i] |= Block.NEEDS_SCOPE;
+                for(int j = i - 1; j >=0; j --) {
+                    if(stack[j] instanceof FunctionNode) {
+                        flags[j] |= FunctionNode.HAS_SCOPE_BLOCK;
+                        return;
+                    }
                 }
             }
         }
@@ -116,8 +141,6 @@ public class LexicalContext {
     public FunctionNode getOutermostFunction() {
         return (FunctionNode)stack[0];
     }
-
-
 
     /**
      * Pushes a new block on top of the context, making it the innermost open block.
@@ -327,10 +350,12 @@ public class LexicalContext {
      * @return the innermost function in the context.
      */
     public FunctionNode getCurrentFunction() {
-        if (isEmpty()) {
-            return null;
+        for (int i = sp - 1; i >= 0; i--) {
+            if (stack[i] instanceof FunctionNode) {
+                return (FunctionNode) stack[i];
+            }
         }
-        return new NodeIterator<>(FunctionNode.class).next();
+        return null;
     }
 
     /**
@@ -395,8 +420,7 @@ public class LexicalContext {
      */
     public boolean isFunctionDefinedInCurrentCall(FunctionNode functionNode) {
         final LexicalContextNode parent = stack[sp - 2];
-        if(parent instanceof CallNode && ((CallNode)parent).getFunction() == functionNode) {
-            assert functionNode.getSource() == peek().getSource();
+        if (parent instanceof CallNode && ((CallNode)parent).getFunction() == functionNode) {
             return true;
         }
         return false;
@@ -444,6 +468,23 @@ public class LexicalContext {
     }
 
     /**
+     * Check whether the lexical context is currently inside a loop
+     * @return true if inside a loop
+     */
+    public boolean inLoop() {
+        return getCurrentLoop() != null;
+    }
+
+    /**
+     * Returns the loop header of the current loop, or null if not inside a loop
+     * @return loop header
+     */
+    public LoopNode getCurrentLoop() {
+        final Iterator<LoopNode> iter = new NodeIterator<>(LoopNode.class, getCurrentFunction());
+        return iter.hasNext() ? iter.next() : null;
+    }
+
+    /**
      * Find the breakable node corresponding to this label.
      * @param label label to search for, if null the closest breakable node will be returned unconditionally, e.g. a while loop with no label
      * @return closest breakable node
@@ -465,8 +506,7 @@ public class LexicalContext {
     }
 
     private LoopNode getContinueTo() {
-        final Iterator<LoopNode> iter = new NodeIterator<>(LoopNode.class, getCurrentFunction());
-        return iter.hasNext() ? iter.next() : null;
+        return getCurrentLoop();
     }
 
     /**
@@ -538,18 +578,22 @@ public class LexicalContext {
         final StringBuffer sb = new StringBuffer();
         sb.append("[ ");
         for (int i = 0; i < sp; i++) {
-            final Node node = stack[i];
+            final Object node = stack[i];
             sb.append(node.getClass().getSimpleName());
             sb.append('@');
             sb.append(Debug.id(node));
             sb.append(':');
-            final Source source = node.getSource();
-            String src = source.toString();
-            if (src.indexOf(File.pathSeparator) != -1) {
-                src = src.substring(src.lastIndexOf(File.pathSeparator));
+            if (node instanceof FunctionNode) {
+                final FunctionNode fn = (FunctionNode)node;
+                final Source source = fn.getSource();
+                String src = source.toString();
+                if (src.indexOf(File.pathSeparator) != -1) {
+                    src = src.substring(src.lastIndexOf(File.pathSeparator));
+                }
+                src += ' ';
+                src += source.getLine(fn.getStart());
+                sb.append(src);
             }
-            src += ' ';
-            src += source.getLine(node.getStart());
             sb.append(' ');
         }
         sb.append(" ==> ]");
@@ -590,7 +634,7 @@ public class LexicalContext {
 
         private T findNext() {
             for (int i = index; i >= 0; i--) {
-                final Node node = stack[i];
+                final Object node = stack[i];
                 if (node == until) {
                     return null;
                 }

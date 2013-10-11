@@ -33,7 +33,7 @@ import jdk.nashorn.internal.ir.visitor.NodeVisitor;
  * Node indicating code is split across classes.
  */
 @Immutable
-public class SplitNode extends LexicalContextNode {
+public class SplitNode extends LexicalContextStatement {
     /** Split node method name. */
     private final String name;
 
@@ -51,7 +51,7 @@ public class SplitNode extends LexicalContextNode {
      * @param compileUnit compile unit to use for the body
      */
     public SplitNode(final String name, final Node body, final CompileUnit compileUnit) {
-        super(body.getSource(), body.getToken(), body.getFinish());
+        super(-1, body.getToken(), body.getFinish());
         this.name        = name;
         this.body        = body;
         this.compileUnit = compileUnit;
@@ -80,7 +80,7 @@ public class SplitNode extends LexicalContextNode {
     }
 
     @Override
-    public Node accept(final LexicalContext lc, final NodeVisitor visitor) {
+    public Node accept(final LexicalContext lc, final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterSplitNode(this)) {
             return visitor.leaveSplitNode(setBody(lc, body.accept(visitor)));
         }

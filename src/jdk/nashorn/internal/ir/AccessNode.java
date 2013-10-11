@@ -28,7 +28,6 @@ package jdk.nashorn.internal.ir;
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation of a property access (period operator.)
@@ -41,18 +40,17 @@ public final class AccessNode extends BaseNode {
     /**
      * Constructor
      *
-     * @param source    source code
      * @param token     token
      * @param finish    finish
      * @param base      base node
      * @param property  property
      */
-    public AccessNode(final Source source, final long token, final int finish, final Node base, final IdentNode property) {
-        super(source, token, finish, base, false, false);
+    public AccessNode(final long token, final int finish, final Expression base, final IdentNode property) {
+        super(token, finish, base, false, false);
         this.property = property.setIsPropertyName();
     }
 
-    private AccessNode(final AccessNode accessNode, final Node base, final IdentNode property, final boolean isFunction, final boolean hasCallSiteType) {
+    private AccessNode(final AccessNode accessNode, final Expression base, final IdentNode property, final boolean isFunction, final boolean hasCallSiteType) {
         super(accessNode, base, isFunction, hasCallSiteType);
         this.property = property;
     }
@@ -62,10 +60,10 @@ public final class AccessNode extends BaseNode {
      * @param visitor IR navigating visitor.
      */
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterAccessNode(this)) {
             return visitor.leaveAccessNode(
-                setBase(base.accept(visitor)).
+                setBase((Expression)base.accept(visitor)).
                 setProperty((IdentNode)property.accept(visitor)));
         }
         return this;
@@ -105,13 +103,12 @@ public final class AccessNode extends BaseNode {
         return property;
     }
 
-    private AccessNode setBase(final Node base) {
+    private AccessNode setBase(final Expression base) {
         if (this.base == base) {
             return this;
         }
         return new AccessNode(this, base, property, isFunction(), hasCallSiteType());
     }
-
 
     private AccessNode setProperty(final IdentNode property) {
         if (this.property == property) {
@@ -121,10 +118,10 @@ public final class AccessNode extends BaseNode {
     }
 
     @Override
-    public AccessNode setType(final Type type) {
+    public AccessNode setType(final TemporarySymbols ts, final LexicalContext lc, final Type type) {
         logTypeChange(type);
-        getSymbol().setTypeOverride(type); //always a temp so this is fine.
-        return new AccessNode(this, base, property.setType(type), isFunction(), hasCallSiteType());
+        final AccessNode newAccessNode = (AccessNode)setSymbol(lc, getSymbol().setTypeOverrideShared(type, ts));
+        return new AccessNode(newAccessNode, base, property.setType(ts, lc, type), isFunction(), hasCallSiteType());
     }
 
     @Override

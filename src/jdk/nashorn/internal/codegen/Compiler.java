@@ -36,26 +36,32 @@ import static jdk.nashorn.internal.codegen.CompilerConstants.SOURCE;
 import static jdk.nashorn.internal.codegen.CompilerConstants.THIS;
 import static jdk.nashorn.internal.codegen.CompilerConstants.VARARGS;
 
+import jdk.nashorn.internal.ir.TemporarySymbols;
+
 import java.io.File;
 import java.lang.reflect.Field;
 import java.security.AccessController;
 import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.logging.Level;
-
 import jdk.internal.dynalink.support.NameCodec;
 import jdk.nashorn.internal.codegen.ClassEmitter.Flag;
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.FunctionNode.CompilationState;
+import jdk.nashorn.internal.ir.debug.ClassHistogramElement;
+import jdk.nashorn.internal.ir.debug.ObjectSizeCalculator;
 import jdk.nashorn.internal.runtime.CodeInstaller;
 import jdk.nashorn.internal.runtime.DebugLogger;
 import jdk.nashorn.internal.runtime.ScriptEnvironment;
@@ -77,6 +83,8 @@ public final class Compiler {
     /** Name of the objects package */
     public static final String OBJECTS_PACKAGE = "jdk/nashorn/internal/objects";
 
+    private Source source;
+
     private final Map<String, byte[]> bytecode;
 
     private final Set<CompileUnit> compileUnits;
@@ -87,13 +95,13 @@ public final class Compiler {
 
     private final ScriptEnvironment env;
 
-    private final String scriptName;
+    private String scriptName;
 
     private boolean strict;
 
-    private FunctionNode functionNode;
+    private final CodeInstaller<ScriptEnvironment> installer;
 
-    private CodeInstaller<ScriptEnvironment> installer;
+    private final TemporarySymbols temporarySymbols = new TemporarySymbols();
 
     /** logger for compiler, trampolines, splits and related code generation events
      *  that affect classes */
@@ -168,6 +176,41 @@ public final class Compiler {
     }
 
     /**
+     * Environment information known to the compile, e.g. params
+     */
+    public static class Hints {
+        private final Type[] paramTypes;
+
+        /** singleton empty hints */
+        public static final Hints EMPTY = new Hints();
+
+        private Hints() {
+            this.paramTypes = null;
+        }
+
+        /**
+         * Constructor
+         * @param paramTypes known parameter types for this callsite
+         */
+        public Hints(final Type[] paramTypes) {
+            this.paramTypes = paramTypes;
+        }
+
+        /**
+         * Get the parameter type for this parameter position, or
+         * null if now known
+         * @param pos position
+         * @return parameter type for this callsite if known
+         */
+        public Type getParameterType(final int pos) {
+            if (paramTypes != null && pos < paramTypes.length) {
+                return paramTypes[pos];
+            }
+            return null;
+        }
+    }
+
+    /**
      * Standard (non-lazy) compilation, that basically will take an entire script
      * and JIT it at once. This can lead to long startup time and fewer type
      * specializations
@@ -176,6 +219,7 @@ public final class Compiler {
         CompilationPhase.CONSTANT_FOLDING_PHASE,
         CompilationPhase.LOWERING_PHASE,
         CompilationPhase.ATTRIBUTION_PHASE,
+        CompilationPhase.RANGE_ANALYSIS_PHASE,
         CompilationPhase.SPLITTING_PHASE,
         CompilationPhase.TYPE_FINALIZATION_PHASE,
         CompilationPhase.BYTECODE_GENERATION_PHASE);
@@ -201,27 +245,28 @@ public final class Compiler {
     /**
      * Constructor
      *
+     * @param env          script environment
      * @param installer    code installer
-     * @param functionNode function node (in any available {@link CompilationState}) to compile
-     * @param sequence     {@link Compiler#CompilationSequence} of {@link CompilationPhase}s to apply as this compilation
+     * @param sequence     {@link Compiler.CompilationSequence} of {@link CompilationPhase}s to apply as this compilation
      * @param strict       should this compilation use strict mode semantics
      */
     //TODO support an array of FunctionNodes for batch lazy compilation
-    Compiler(final ScriptEnvironment env, final CodeInstaller<ScriptEnvironment> installer, final FunctionNode functionNode, final CompilationSequence sequence, final boolean strict) {
+    Compiler(final ScriptEnvironment env, final CodeInstaller<ScriptEnvironment> installer, final CompilationSequence sequence, final boolean strict) {
         this.env           = env;
-        this.functionNode  = functionNode;
         this.sequence      = sequence;
         this.installer     = installer;
-        this.strict        = strict || functionNode.isStrict();
         this.constantData  = new ConstantData();
         this.compileUnits  = new HashSet<>();
         this.bytecode      = new HashMap<>();
+    }
 
+    private void initCompiler(final FunctionNode functionNode) {
+        this.strict        = strict || functionNode.isStrict();
         final StringBuilder sb = new StringBuilder();
         sb.append(functionNode.uniqueName(DEFAULT_SCRIPT_NAME.symbolName() + lazyTag(functionNode))).
                 append('$').
                 append(safeSourceName(functionNode.getSource()));
-
+        this.source = functionNode.getSource();
         this.scriptName = sb.toString();
     }
 
@@ -229,52 +274,79 @@ public final class Compiler {
      * Constructor
      *
      * @param installer    code installer
-     * @param functionNode function node (in any available {@link CompilationState}) to compile
      * @param strict       should this compilation use strict mode semantics
      */
-    public Compiler(final CodeInstaller<ScriptEnvironment> installer, final FunctionNode functionNode, final boolean strict) {
-        this(installer.getOwner(), installer, functionNode, sequence(installer.getOwner()._lazy_compilation), strict);
+    public Compiler(final CodeInstaller<ScriptEnvironment> installer, final boolean strict) {
+        this(installer.getOwner(), installer, sequence(installer.getOwner()._lazy_compilation), strict);
     }
 
     /**
      * Constructor - compilation will use the same strict semantics as in script environment
      *
      * @param installer    code installer
-     * @param functionNode function node (in any available {@link CompilationState}) to compile
      */
-    public Compiler(final CodeInstaller<ScriptEnvironment> installer, final FunctionNode functionNode) {
-        this(installer.getOwner(), installer, functionNode, sequence(installer.getOwner()._lazy_compilation), installer.getOwner()._strict);
+    public Compiler(final CodeInstaller<ScriptEnvironment> installer) {
+        this(installer.getOwner(), installer, sequence(installer.getOwner()._lazy_compilation), installer.getOwner()._strict);
     }
 
     /**
      * Constructor - compilation needs no installer, but uses a script environment
      * Used in "compile only" scenarios
      * @param env a script environment
-     * @param functionNode functionNode to compile
      */
-    public Compiler(final ScriptEnvironment env, final FunctionNode functionNode) {
-        this(env, null, functionNode, sequence(env._lazy_compilation), env._strict);
+    public Compiler(final ScriptEnvironment env) {
+        this(env, null, sequence(env._lazy_compilation), env._strict);
+    }
+
+    private static void printMemoryUsage(final String phaseName, final FunctionNode functionNode) {
+        LOG.info(phaseName + " finished. Doing IR size calculation...");
+
+        final ObjectSizeCalculator osc = new ObjectSizeCalculator(ObjectSizeCalculator.getEffectiveMemoryLayoutSpecification());
+        osc.calculateObjectSize(functionNode);
+
+        final List<ClassHistogramElement> list = osc.getClassHistogram();
+
+        final StringBuilder sb = new StringBuilder();
+        final long totalSize = osc.calculateObjectSize(functionNode);
+        sb.append(phaseName).append(" Total size = ").append(totalSize / 1024 / 1024).append("MB");
+        LOG.info(sb);
+
+        Collections.sort(list, new Comparator<ClassHistogramElement>() {
+            @Override
+            public int compare(ClassHistogramElement o1, ClassHistogramElement o2) {
+                final long diff = o1.getBytes() - o2.getBytes();
+                if (diff < 0) {
+                    return 1;
+                } else if (diff > 0) {
+                    return -1;
+                } else {
+                    return 0;
+                }
+            }
+        });
+        for (final ClassHistogramElement e : list) {
+            final String line = String.format("    %-48s %10d bytes (%8d instances)", e.getClazz(), e.getBytes(), e.getInstances());
+            LOG.info(line);
+            if (e.getBytes() < totalSize / 200) {
+                LOG.info("    ...");
+                break; // never mind, so little memory anyway
+            }
+        }
     }
 
     /**
      * Execute the compilation this Compiler was created with
-     * @params param types if known, for specialization
+     * @param functionNode function node to compile from its current state
      * @throws CompilationException if something goes wrong
      * @return function node that results from code transforms
      */
-    public FunctionNode compile() throws CompilationException {
-        return compile(null);
-    }
+    public FunctionNode compile(final FunctionNode functionNode) throws CompilationException {
+        FunctionNode newFunctionNode = functionNode;
 
-    /**
-     * Execute the compilation this Compiler was created with
-     * @param paramTypes param types if known, for specialization
-     * @throws CompilationException if something goes wrong
-     * @return function node that results from code transforms
-     */
-    public FunctionNode compile(final Class<?> paramTypes) throws CompilationException {
+        initCompiler(newFunctionNode); //TODO move this state into functionnode?
+
         for (final String reservedName : RESERVED_NAMES) {
-            functionNode.uniqueName(reservedName);
+            newFunctionNode.uniqueName(reservedName);
         }
 
         final boolean fine = !LOG.levelAbove(Level.FINE);
@@ -283,7 +355,11 @@ public final class Compiler {
         long time = 0L;
 
         for (final CompilationPhase phase : sequence) {
-            this.functionNode = phase.apply(this, functionNode);
+            newFunctionNode = phase.apply(this, newFunctionNode);
+
+            if (env._print_mem_usage) {
+                printMemoryUsage(phase.toString(), newFunctionNode);
+            }
 
             final long duration = Timing.isEnabled() ? (phase.getEndTime() - phase.getStartTime()) : 0L;
             time += duration;
@@ -293,7 +369,7 @@ public final class Compiler {
 
                 sb.append(phase.toString()).
                     append(" done for function '").
-                    append(functionNode.getName()).
+                    append(newFunctionNode.getName()).
                     append('\'');
 
                 if (duration > 0L) {
@@ -309,7 +385,9 @@ public final class Compiler {
         if (info) {
             final StringBuilder sb = new StringBuilder();
             sb.append("Compile job for '").
-                append(functionNode.getName()).
+                append(newFunctionNode.getSource()).
+                append(':').
+                append(newFunctionNode.getName()).
                 append("' finished");
 
             if (time > 0L) {
@@ -321,7 +399,7 @@ public final class Compiler {
             LOG.info(sb);
         }
 
-        return functionNode;
+        return newFunctionNode;
     }
 
     private Class<?> install(final String className, final byte[] code) {
@@ -330,7 +408,6 @@ public final class Compiler {
         final Class<?> clazz = installer.install(Compiler.binaryName(className), code);
 
         try {
-            final Source   source    = getSource();
             final Object[] constants = getConstantData().toArray();
             // Need doPrivileged because these fields are private
             AccessController.doPrivileged(new PrivilegedExceptionAction<Void>() {
@@ -355,9 +432,10 @@ public final class Compiler {
 
     /**
      * Install compiled classes into a given loader
+     * @param functionNode function node to install - must be in {@link CompilationState#EMITTED} state
      * @return root script class - if there are several compile units they will also be installed
      */
-    public Class<?> install() {
+    public Class<?> install(final FunctionNode functionNode) {
         final long t0 = Timing.isEnabled() ? System.currentTimeMillis() : 0L;
 
         assert functionNode.hasState(CompilationState.EMITTED) : functionNode.getName() + " has no bytecode and cannot be installed";
@@ -412,7 +490,7 @@ public final class Compiler {
         }
 
         if (sb != null) {
-            LOG.info(sb);
+            LOG.fine(sb);
         }
 
         return rootClass;
@@ -430,10 +508,6 @@ public final class Compiler {
         this.strict = strict;
     }
 
-    FunctionNode getFunctionNode() {
-        return functionNode;
-    }
-
     ConstantData getConstantData() {
         return constantData;
     }
@@ -442,8 +516,8 @@ public final class Compiler {
         return installer;
     }
 
-    Source getSource() {
-        return functionNode.getSource();
+    TemporarySymbols getTemporarySymbols() {
+        return temporarySymbols;
     }
 
     void addClass(final String name, final byte[] code) {
@@ -454,8 +528,8 @@ public final class Compiler {
         return this.env;
     }
 
-    private static String safeSourceName(final Source source) {
-        String baseName = new File(source.getName()).getName();
+    private String safeSourceName(final Source src) {
+        String baseName = new File(src.getName()).getName();
 
         final int index = baseName.lastIndexOf(".js");
         if (index != -1) {
@@ -463,6 +537,9 @@ public final class Compiler {
         }
 
         baseName = baseName.replace('.', '_').replace('-', '_');
+        if (! env._loader_per_compile) {
+            baseName = baseName + installer.getUniqueScriptId();
+        }
         final String mangled = NameCodec.encode(baseName);
 
         return mangled != null ? mangled : baseName;
@@ -496,7 +573,7 @@ public final class Compiler {
     }
 
     private CompileUnit initCompileUnit(final String unitClassName, final long initialWeight) {
-        final ClassEmitter classEmitter = new ClassEmitter(env, functionNode.getSource().getName(), unitClassName, strict);
+        final ClassEmitter classEmitter = new ClassEmitter(env, source.getName(), unitClassName, strict);
         final CompileUnit  compileUnit  = new CompileUnit(unitClassName, classEmitter, initialWeight);
 
         classEmitter.begin();
@@ -550,6 +627,4 @@ public final class Compiler {
         USE_INT_ARITH  =  Options.getBooleanProperty("nashorn.compiler.intarithmetic");
         assert !USE_INT_ARITH : "Integer arithmetic is not enabled";
     }
-
-
 }

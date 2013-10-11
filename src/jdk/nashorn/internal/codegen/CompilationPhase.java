@@ -11,19 +11,26 @@ import static jdk.nashorn.internal.ir.FunctionNode.CompilationState.SPLIT;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import jdk.nashorn.internal.codegen.types.Range;
 import jdk.nashorn.internal.codegen.types.Type;
-import jdk.nashorn.internal.ir.Block;
 import jdk.nashorn.internal.ir.CallNode;
+import jdk.nashorn.internal.ir.Expression;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.FunctionNode.CompilationState;
 import jdk.nashorn.internal.ir.LexicalContext;
 import jdk.nashorn.internal.ir.Node;
+import jdk.nashorn.internal.ir.ReturnNode;
+import jdk.nashorn.internal.ir.Symbol;
+import jdk.nashorn.internal.ir.TemporarySymbols;
 import jdk.nashorn.internal.ir.debug.ASTWriter;
 import jdk.nashorn.internal.ir.debug.PrintVisitor;
-import jdk.nashorn.internal.ir.visitor.NodeOperatorVisitor;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.runtime.ECMAErrors;
 import jdk.nashorn.internal.runtime.ScriptEnvironment;
@@ -42,7 +49,7 @@ enum CompilationPhase {
      */
     LAZY_INITIALIZATION_PHASE(EnumSet.of(INITIALIZED, PARSED)) {
         @Override
-        FunctionNode transform(final Compiler compiler, final FunctionNode fn0) {
+        FunctionNode transform(final Compiler compiler, final FunctionNode fn) {
 
             /*
              * For lazy compilation, we might be given a node previously marked
@@ -58,15 +65,14 @@ enum CompilationPhase {
              * function from a trampoline
              */
 
-            final FunctionNode outermostFunctionNode = compiler.getFunctionNode();
-            assert outermostFunctionNode == fn0;
+            final FunctionNode outermostFunctionNode = fn;
 
             final Set<FunctionNode> neverLazy = new HashSet<>();
             final Set<FunctionNode> lazy      = new HashSet<>();
 
             FunctionNode newFunctionNode = outermostFunctionNode;
 
-            newFunctionNode = (FunctionNode)newFunctionNode.accept(new NodeVisitor() {
+            newFunctionNode = (FunctionNode)newFunctionNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
                 // self references are done with invokestatic and thus cannot
                 // have trampolines - never lazy
                 @Override
@@ -99,10 +105,9 @@ enum CompilationPhase {
                 lazy.remove(node);
             }
 
-            newFunctionNode = (FunctionNode)newFunctionNode.accept(new NodeOperatorVisitor() {
+            newFunctionNode = (FunctionNode)newFunctionNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
                 @Override
                 public Node leaveFunctionNode(final FunctionNode functionNode) {
-                    final LexicalContext lc = getLexicalContext();
                     if (lazy.contains(functionNode)) {
                         Compiler.LOG.fine(
                                 "Marking ",
@@ -111,7 +116,7 @@ enum CompilationPhase {
                         final FunctionNode parent = lc.getParentFunction(functionNode);
                         assert parent != null;
                         lc.setFlag(parent, FunctionNode.HAS_LAZY_CHILDREN);
-                        lc.setFlag(parent.getBody(), Block.NEEDS_SCOPE);
+                        lc.setBlockNeedsScope(parent.getBody());
                         lc.setFlag(functionNode, FunctionNode.IS_LAZY);
                         return functionNode;
                     }
@@ -172,20 +177,30 @@ enum CompilationPhase {
     ATTRIBUTION_PHASE(EnumSet.of(INITIALIZED, PARSED, CONSTANT_FOLDED, LOWERED)) {
         @Override
         FunctionNode transform(final Compiler compiler, final FunctionNode fn) {
-            return (FunctionNode)initReturnTypes(fn).accept(new Attr());
+            final TemporarySymbols ts = compiler.getTemporarySymbols();
+            final FunctionNode newFunctionNode = (FunctionNode)enterAttr(fn, ts).accept(new Attr(ts));
+            if (compiler.getEnv()._print_mem_usage) {
+                Compiler.LOG.info("Attr temporary symbol count: " + ts.getTotalSymbolCount());
+            }
+            return newFunctionNode;
         }
 
         /**
          * Pessimistically set all lazy functions' return types to Object
+         * and the function symbols to object
          * @param functionNode node where to start iterating
          */
-        private FunctionNode initReturnTypes(final FunctionNode functionNode) {
-            return (FunctionNode)functionNode.accept(new NodeVisitor() {
+        private FunctionNode enterAttr(final FunctionNode functionNode, final TemporarySymbols ts) {
+            return (FunctionNode)functionNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
                 @Override
                 public Node leaveFunctionNode(final FunctionNode node) {
-                    return node.isLazy() ?
-                           node.setReturnType(getLexicalContext(), Type.OBJECT) :
-                           node.setReturnType(getLexicalContext(), Type.UNKNOWN);
+                    if (node.isLazy()) {
+                        FunctionNode newNode = node.setReturnType(lc, Type.OBJECT);
+                        return ts.ensureSymbol(lc, Type.OBJECT, newNode);
+                    }
+                    //node may have a reference here that needs to be nulled if it was referred to by
+                    //its outer context, if it is lazy and not attributed
+                    return node.setReturnType(lc, Type.UNKNOWN).setSymbol(lc, null);
                 }
             });
         }
@@ -195,6 +210,92 @@ enum CompilationPhase {
             return "[Type Attribution]";
         }
     },
+
+    /*
+     * Range analysis
+     *    Conservatively prove that certain variables can be narrower than
+     *    the most generic number type
+     */
+    RANGE_ANALYSIS_PHASE(EnumSet.of(INITIALIZED, PARSED, CONSTANT_FOLDED, LOWERED, ATTR)) {
+        @Override
+        FunctionNode transform(final Compiler compiler, final FunctionNode fn) {
+            if (!compiler.getEnv()._range_analysis) {
+                return fn;
+            }
+
+            FunctionNode newFunctionNode = (FunctionNode)fn.accept(new RangeAnalyzer());
+            final List<ReturnNode> returns = new ArrayList<>();
+
+            newFunctionNode = (FunctionNode)newFunctionNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
+                private final Deque<ArrayList<ReturnNode>> returnStack = new ArrayDeque<>();
+
+                @Override
+                public boolean enterFunctionNode(final FunctionNode functionNode) {
+                    returnStack.push(new ArrayList<ReturnNode>());
+                    return true;
+                }
+
+                @Override
+                public Node leaveFunctionNode(final FunctionNode functionNode) {
+                    Type returnType = Type.UNKNOWN;
+                    for (final ReturnNode ret : returnStack.pop()) {
+                        if (ret.getExpression() == null) {
+                            returnType = Type.OBJECT;
+                            break;
+                        }
+                        returnType = Type.widest(returnType, ret.getExpression().getType());
+                    }
+                    return functionNode.setReturnType(lc, returnType);
+                }
+
+                @Override
+                public Node leaveReturnNode(final ReturnNode returnNode) {
+                    final ReturnNode result = (ReturnNode)leaveDefault(returnNode);
+                    returns.add(result);
+                    return result;
+                }
+
+                @Override
+                public Node leaveDefault(final Node node) {
+                    if(node instanceof Expression) {
+                        final Expression expr = (Expression)node;
+                        final Symbol symbol = expr.getSymbol();
+                        if (symbol != null) {
+                            final Range range  = symbol.getRange();
+                            final Type  symbolType = symbol.getSymbolType();
+                            if (!symbolType.isNumeric()) {
+                                return expr;
+                            }
+                            final Type  rangeType  = range.getType();
+                            if (!Type.areEquivalent(symbolType, rangeType) && Type.widest(symbolType, rangeType) == symbolType) { //we can narrow range
+                                RangeAnalyzer.LOG.info("[", lc.getCurrentFunction().getName(), "] ", symbol, " can be ", range.getType(), " ", symbol.getRange());
+                                return expr.setSymbol(lc, symbol.setTypeOverrideShared(range.getType(), compiler.getTemporarySymbols()));
+                            }
+                        }
+                    }
+                    return node;
+                }
+            });
+
+            Type returnType = Type.UNKNOWN;
+            for (final ReturnNode node : returns) {
+                if (node.getExpression() != null) {
+                    returnType = Type.widest(returnType, node.getExpression().getType());
+                } else {
+                    returnType = Type.OBJECT;
+                    break;
+                }
+            }
+
+            return newFunctionNode.setReturnType(null, returnType);
+        }
+
+        @Override
+        public String toString() {
+            return "[Range Analysis]";
+        }
+    },
+
 
     /*
      * Splitter Split the AST into several compile units based on a size
@@ -215,15 +316,6 @@ enum CompilationPhase {
                 assert compiler.getStrictMode();
                 compiler.setStrictMode(true);
             }
-
-            /*
-            newFunctionNode.accept(new NodeVisitor() {
-                @Override
-                public boolean enterFunctionNode(final FunctionNode functionNode) {
-                    assert functionNode.getCompileUnit() != null : functionNode.getName() + " " + Debug.id(functionNode) + " has no compile unit";
-                    return true;
-                }
-            });*/
 
             return newFunctionNode;
         }
@@ -252,7 +344,7 @@ enum CompilationPhase {
         FunctionNode transform(final Compiler compiler, final FunctionNode fn) {
             final ScriptEnvironment env = compiler.getEnv();
 
-            final FunctionNode newFunctionNode = (FunctionNode)fn.accept(new FinalizeTypes());
+            final FunctionNode newFunctionNode = (FunctionNode)fn.accept(new FinalizeTypes(compiler.getTemporarySymbols()));
 
             if (env._print_lower_ast) {
                 env.getErr().println(new ASTWriter(newFunctionNode));
@@ -322,30 +414,34 @@ enum CompilationPhase {
                     compiler.getCodeInstaller().verify(bytecode);
                 }
 
-                // should code be dumped to disk - only valid in compile_only
-                // mode?
+                // should code be dumped to disk - only valid in compile_only mode?
                 if (env._dest_dir != null && env._compile_only) {
                     final String fileName = className.replace('.', File.separatorChar) + ".class";
-                    final int index = fileName.lastIndexOf(File.separatorChar);
+                    final int    index    = fileName.lastIndexOf(File.separatorChar);
 
+                    final File dir;
                     if (index != -1) {
-                        final File dir = new File(fileName.substring(0, index));
-                        try {
-                            if (!dir.exists() && !dir.mkdirs()) {
-                                throw new IOException(dir.toString());
-                            }
-                            final File file = new File(env._dest_dir, fileName);
-                            try (final FileOutputStream fos = new FileOutputStream(file)) {
-                                fos.write(bytecode);
-                            }
-                        } catch (final IOException e) {
-                            Compiler.LOG.warning("Skipping class dump for ",
-                                    className,
-                                    ": ",
-                                    ECMAErrors.getMessage(
-                                        "io.error.cant.write",
-                                        dir.toString()));
+                        dir = new File(env._dest_dir, fileName.substring(0, index));
+                    } else {
+                        dir = new File(env._dest_dir);
+                    }
+
+                    try {
+                        if (!dir.exists() && !dir.mkdirs()) {
+                            throw new IOException(dir.toString());
                         }
+                        final File file = new File(env._dest_dir, fileName);
+                        try (final FileOutputStream fos = new FileOutputStream(file)) {
+                            fos.write(bytecode);
+                        }
+                        Compiler.LOG.info("Wrote class to '" + file.getAbsolutePath() + '\'');
+                    } catch (final IOException e) {
+                        Compiler.LOG.warning("Skipping class dump for ",
+                                className,
+                                ": ",
+                                ECMAErrors.getMessage(
+                                    "io.error.cant.write",
+                                    dir.toString()));
                     }
                 }
             }

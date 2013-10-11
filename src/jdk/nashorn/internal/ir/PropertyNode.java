@@ -27,7 +27,6 @@ package jdk.nashorn.internal.ir;
 
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation of an object literal property.
@@ -39,7 +38,7 @@ public final class PropertyNode extends Node {
     private final PropertyKey key;
 
     /** Property value. */
-    private final Node value;
+    private final Expression value;
 
     /** Property getter. */
     private final FunctionNode getter;
@@ -50,7 +49,6 @@ public final class PropertyNode extends Node {
     /**
      * Constructor
      *
-     * @param source  the source
      * @param token   token
      * @param finish  finish
      * @param key     the key of this property
@@ -58,15 +56,15 @@ public final class PropertyNode extends Node {
      * @param getter  getter function body
      * @param setter  setter function body
      */
-    public PropertyNode(final Source source, final long token, final int finish, final PropertyKey key, final Node value, final FunctionNode getter, final FunctionNode setter) {
-        super(source, token, finish);
+    public PropertyNode(final long token, final int finish, final PropertyKey key, final Expression value, final FunctionNode getter, final FunctionNode setter) {
+        super(token, finish);
         this.key    = key;
         this.value  = value;
         this.getter = getter;
         this.setter = setter;
     }
 
-    private PropertyNode(final PropertyNode propertyNode, final PropertyKey key, final Node value, final FunctionNode getter, final FunctionNode setter) {
+    private PropertyNode(final PropertyNode propertyNode, final PropertyKey key, final Expression value, final FunctionNode getter, final FunctionNode setter) {
         super(propertyNode);
         this.key    = key;
         this.value  = value;
@@ -83,11 +81,11 @@ public final class PropertyNode extends Node {
     }
 
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterPropertyNode(this)) {
             return visitor.leavePropertyNode(
                 setKey((PropertyKey)((Node)key).accept(visitor)).
-                setValue(value == null ? null : value.accept(visitor)).
+                setValue(value == null ? null : (Expression)value.accept(visitor)).
                 setGetter(getter == null ? null : (FunctionNode)getter.accept(visitor)).
                 setSetter(setter == null ? null : (FunctionNode)setter.accept(visitor)));
         }
@@ -142,8 +140,8 @@ public final class PropertyNode extends Node {
      * Return the key for this property node
      * @return the key
      */
-    public Node getKey() {
-        return (Node)key;
+    public Expression getKey() {
+        return (Expression)key;
     }
 
     private PropertyNode setKey(final PropertyKey key) {
@@ -177,7 +175,7 @@ public final class PropertyNode extends Node {
      * Get the value of this property
      * @return property value
      */
-    public Node getValue() {
+    public Expression getValue() {
         return value;
     }
 
@@ -186,7 +184,7 @@ public final class PropertyNode extends Node {
      * @param value new value
      * @return same node or new node if state changed
      */
-    public PropertyNode setValue(final Node value) {
+    public PropertyNode setValue(final Expression value) {
         if (this.value == value) {
             return this;
         }

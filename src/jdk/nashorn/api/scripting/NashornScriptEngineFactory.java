@@ -30,8 +30,8 @@ import java.util.Collections;
 import java.util.List;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineFactory;
+import jdk.nashorn.internal.runtime.Context;
 import jdk.nashorn.internal.runtime.Version;
-import sun.reflect.Reflection;
 
 /**
  * JSR-223 compliant script engine factory for Nashorn. The engine answers for:
@@ -137,7 +137,14 @@ public final class NashornScriptEngineFactory implements ScriptEngineFactory {
 
     @Override
     public ScriptEngine getScriptEngine() {
-        return new NashornScriptEngine(this, getAppClassLoader());
+        try {
+            return new NashornScriptEngine(this, getAppClassLoader());
+        } catch (final RuntimeException e) {
+            if (Context.DEBUG) {
+                e.printStackTrace();
+            }
+            throw e;
+        }
     }
 
     /**
@@ -179,7 +186,7 @@ public final class NashornScriptEngineFactory implements ScriptEngineFactory {
     private static void checkConfigPermission() {
         final SecurityManager sm = System.getSecurityManager();
         if (sm != null) {
-            sm.checkPermission(new RuntimePermission("nashorn.setConfig"));
+            sm.checkPermission(new RuntimePermission(Context.NASHORN_SET_CONFIG));
         }
     }
 

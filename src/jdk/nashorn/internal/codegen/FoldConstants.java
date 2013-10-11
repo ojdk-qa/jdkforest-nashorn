@@ -28,12 +28,14 @@ package jdk.nashorn.internal.codegen;
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.BinaryNode;
 import jdk.nashorn.internal.ir.Block;
+import jdk.nashorn.internal.ir.BlockStatement;
 import jdk.nashorn.internal.ir.EmptyNode;
-import jdk.nashorn.internal.ir.ExecuteNode;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.FunctionNode.CompilationState;
 import jdk.nashorn.internal.ir.IfNode;
+import jdk.nashorn.internal.ir.LexicalContext;
 import jdk.nashorn.internal.ir.LiteralNode;
+import jdk.nashorn.internal.ir.LiteralNode.ArrayLiteralNode;
 import jdk.nashorn.internal.ir.Node;
 import jdk.nashorn.internal.ir.TernaryNode;
 import jdk.nashorn.internal.ir.UnaryNode;
@@ -41,16 +43,16 @@ import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.runtime.DebugLogger;
 import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.ScriptRuntime;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * Simple constant folding pass, executed before IR is starting to be lowered.
  */
-final class FoldConstants extends NodeVisitor {
+final class FoldConstants extends NodeVisitor<LexicalContext> {
 
     private static final DebugLogger LOG = new DebugLogger("fold");
 
     FoldConstants() {
+        super(new LexicalContext());
     }
 
     @Override
@@ -80,7 +82,7 @@ final class FoldConstants extends NodeVisitor {
 
     @Override
     public Node leaveFunctionNode(final FunctionNode functionNode) {
-        return functionNode.setState(getLexicalContext(), CompilationState.CONSTANT_FOLDED);
+        return functionNode.setState(lc, CompilationState.CONSTANT_FOLDED);
     }
 
     @Override
@@ -89,7 +91,7 @@ final class FoldConstants extends NodeVisitor {
         if (test instanceof LiteralNode) {
             final Block shortCut = ((LiteralNode<?>)test).isTrue() ? ifNode.getPass() : ifNode.getFail();
             if (shortCut != null) {
-                return new ExecuteNode(shortCut);
+                return new BlockStatement(ifNode.getLineNumber(), shortCut);
             }
             return new EmptyNode(ifNode);
         }
@@ -98,9 +100,9 @@ final class FoldConstants extends NodeVisitor {
 
     @Override
     public Node leaveTernaryNode(final TernaryNode ternaryNode) {
-        final Node test = ternaryNode.lhs();
+        final Node test = ternaryNode.getTest();
         if (test instanceof LiteralNode) {
-            return ((LiteralNode<?>)test).isTrue() ? ternaryNode.rhs() : ternaryNode.third();
+            return ((LiteralNode<?>)test).isTrue() ? ternaryNode.getTrueExpression() : ternaryNode.getFalseExpression();
         }
         return ternaryNode;
     }
@@ -112,13 +114,11 @@ final class FoldConstants extends NodeVisitor {
      */
     abstract static class ConstantEvaluator<T extends Node> {
         protected T            parent;
-        protected final Source source;
         protected final long   token;
         protected final int    finish;
 
         protected ConstantEvaluator(final T parent) {
             this.parent = parent;
-            this.source = parent.getSource();
             this.token  = parent.getToken();
             this.finish = parent.getFinish();
         }
@@ -144,6 +144,10 @@ final class FoldConstants extends NodeVisitor {
                 return null;
             }
 
+            if (rhsNode instanceof ArrayLiteralNode) {
+                return null;
+            }
+
             final LiteralNode<?> rhs = (LiteralNode<?>)rhsNode;
             final boolean rhsInteger = rhs.getType().isInteger();
 
@@ -152,23 +156,23 @@ final class FoldConstants extends NodeVisitor {
             switch (parent.tokenType()) {
             case ADD:
                 if (rhsInteger) {
-                    literalNode = LiteralNode.newInstance(source, token, finish, rhs.getInt32());
+                    literalNode = LiteralNode.newInstance(token, finish, rhs.getInt32());
                 } else {
-                    literalNode = LiteralNode.newInstance(source, token, finish, rhs.getNumber());
+                    literalNode = LiteralNode.newInstance(token, finish, rhs.getNumber());
                 }
                 break;
             case SUB:
                 if (rhsInteger && rhs.getInt32() != 0) { // @see test/script/basic/minuszero.js
-                    literalNode = LiteralNode.newInstance(source, token, finish, -rhs.getInt32());
+                    literalNode = LiteralNode.newInstance(token, finish, -rhs.getInt32());
                 } else {
-                    literalNode = LiteralNode.newInstance(source, token, finish, -rhs.getNumber());
+                    literalNode = LiteralNode.newInstance(token, finish, -rhs.getNumber());
                 }
                 break;
             case NOT:
-                literalNode = LiteralNode.newInstance(source, token, finish, !rhs.getBoolean());
+                literalNode = LiteralNode.newInstance(token, finish, !rhs.getBoolean());
                 break;
             case BIT_NOT:
-                literalNode = LiteralNode.newInstance(source, token, finish, ~rhs.getInt32());
+                literalNode = LiteralNode.newInstance(token, finish, ~rhs.getInt32());
                 break;
             default:
                 return null;
@@ -215,6 +219,10 @@ final class FoldConstants extends NodeVisitor {
             final LiteralNode<?> lhs = (LiteralNode<?>)parent.lhs();
             final LiteralNode<?> rhs = (LiteralNode<?>)parent.rhs();
 
+            if (lhs instanceof ArrayLiteralNode || rhs instanceof ArrayLiteralNode) {
+                return null;
+            }
+
             final Type widest = Type.widest(lhs.getType(), rhs.getType());
 
             boolean isInteger = widest.isInteger();
@@ -234,7 +242,7 @@ final class FoldConstants extends NodeVisitor {
                         break;
                     }
                     assert res instanceof CharSequence : res + " was not a CharSequence, it was a " + res.getClass();
-                    return LiteralNode.newInstance(source, token, finish, res.toString());
+                    return LiteralNode.newInstance(token, finish, res.toString());
                 }
                 return null;
             case MUL:
@@ -247,33 +255,33 @@ final class FoldConstants extends NodeVisitor {
                 value = lhs.getNumber() - rhs.getNumber();
                 break;
             case SHR:
-                return LiteralNode.newInstance(source, token, finish, (lhs.getInt32() >>> rhs.getInt32()) & JSType.MAX_UINT);
+                return LiteralNode.newInstance(token, finish, (lhs.getInt32() >>> rhs.getInt32()) & JSType.MAX_UINT);
             case SAR:
-                return LiteralNode.newInstance(source, token, finish, lhs.getInt32() >> rhs.getInt32());
+                return LiteralNode.newInstance(token, finish, lhs.getInt32() >> rhs.getInt32());
             case SHL:
-                return LiteralNode.newInstance(source, token, finish, lhs.getInt32() << rhs.getInt32());
+                return LiteralNode.newInstance(token, finish, lhs.getInt32() << rhs.getInt32());
             case BIT_XOR:
-                return LiteralNode.newInstance(source, token, finish, lhs.getInt32() ^ rhs.getInt32());
+                return LiteralNode.newInstance(token, finish, lhs.getInt32() ^ rhs.getInt32());
             case BIT_AND:
-                return LiteralNode.newInstance(source, token, finish, lhs.getInt32() & rhs.getInt32());
+                return LiteralNode.newInstance(token, finish, lhs.getInt32() & rhs.getInt32());
             case BIT_OR:
-                return LiteralNode.newInstance(source, token, finish, lhs.getInt32() | rhs.getInt32());
+                return LiteralNode.newInstance(token, finish, lhs.getInt32() | rhs.getInt32());
             case GE:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.GE(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.GE(lhs.getObject(), rhs.getObject()));
             case LE:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.LE(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.LE(lhs.getObject(), rhs.getObject()));
             case GT:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.GT(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.GT(lhs.getObject(), rhs.getObject()));
             case LT:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.LT(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.LT(lhs.getObject(), rhs.getObject()));
             case NE:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.NE(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.NE(lhs.getObject(), rhs.getObject()));
             case NE_STRICT:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.NE_STRICT(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.NE_STRICT(lhs.getObject(), rhs.getObject()));
             case EQ:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.EQ(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.EQ(lhs.getObject(), rhs.getObject()));
             case EQ_STRICT:
-                return LiteralNode.newInstance(source, token, finish, ScriptRuntime.EQ_STRICT(lhs.getObject(), rhs.getObject()));
+                return LiteralNode.newInstance(token, finish, ScriptRuntime.EQ_STRICT(lhs.getObject(), rhs.getObject()));
             default:
                 return null;
             }
@@ -282,12 +290,12 @@ final class FoldConstants extends NodeVisitor {
             isLong    &= value != 0.0 && JSType.isRepresentableAsLong(value);
 
             if (isInteger) {
-                return LiteralNode.newInstance(source, token, finish, JSType.toInt32(value));
+                return LiteralNode.newInstance(token, finish, (int)value);
             } else if (isLong) {
-                return LiteralNode.newInstance(source, token, finish, JSType.toLong(value));
+                return LiteralNode.newInstance(token, finish, (long)value);
             }
 
-            return LiteralNode.newInstance(source, token, finish, value);
+            return LiteralNode.newInstance(token, finish, value);
         }
     }
 }

@@ -25,6 +25,7 @@
 
 package jdk.nashorn.internal.parser;
 
+import java.util.Locale;
 import static jdk.nashorn.internal.parser.TokenKind.BINARY;
 import static jdk.nashorn.internal.parser.TokenKind.BRACKET;
 import static jdk.nashorn.internal.parser.TokenKind.FUTURE;
@@ -43,6 +44,7 @@ public enum TokenType {
     ERROR          (SPECIAL,  null),
     EOF            (SPECIAL,  null),
     EOL            (SPECIAL,  null),
+    COMMENT        (SPECIAL,  null),
 
     NOT            (UNARY,   "!",    14, false),
     NE             (BINARY,  "!=",    9, true),
@@ -92,7 +94,7 @@ public enum TokenType {
     ASSIGN_BIT_OR  (BINARY,  "|=",    2, false),
     OR             (BINARY,  "||",    4, true),
     RBRACE         (BRACKET, "}"),
-    BIT_NOT        (BINARY,  "~",    14, false),
+    BIT_NOT        (UNARY,   "~",     14, false),
 
     // ECMA 7.6.1.1 Keywords, 7.6.1.2 Future Reserved Words.
     // All other Java keywords are commented out.
@@ -249,7 +251,7 @@ public enum TokenType {
     }
 
     public String getNameOrType() {
-        return name == null ? super.name().toLowerCase() : name;
+        return name == null ? super.name().toLowerCase(Locale.ENGLISH) : name;
     }
 
     public TokenType getNext() {
@@ -282,7 +284,7 @@ public enum TokenType {
 
     @Override
     public String toString() {
-        return name;
+        return getNameOrType();
     }
 
     static {

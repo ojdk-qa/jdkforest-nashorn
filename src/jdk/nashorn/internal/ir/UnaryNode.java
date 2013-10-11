@@ -35,42 +35,40 @@ import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.parser.Token;
 import jdk.nashorn.internal.parser.TokenType;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * UnaryNode nodes represent single operand operations.
  */
 @Immutable
-public final class UnaryNode extends Node implements Assignment<Node> {
+public final class UnaryNode extends Expression implements Assignment<Expression> {
     /** Right hand side argument. */
-    private final Node rhs;
+    private final Expression rhs;
 
     /**
      * Constructor
      *
-     * @param source the source
      * @param token  token
      * @param rhs    expression
      */
-    public UnaryNode(final Source source, final long token, final Node rhs) {
-        this(source, token, Math.min(rhs.getStart(), Token.descPosition(token)), Math.max(Token.descPosition(token) + Token.descLength(token), rhs.getFinish()), rhs);
+    public UnaryNode(final long token, final Expression rhs) {
+        this(token, Math.min(rhs.getStart(), Token.descPosition(token)), Math.max(Token.descPosition(token) + Token.descLength(token), rhs.getFinish()), rhs);
     }
 
     /**
      * Constructor
-     * @param source the source
+     *
      * @param token  token
      * @param start  start
      * @param finish finish
      * @param rhs    expression
      */
-    public UnaryNode(final Source source, final long token, final int start, final int finish, final Node rhs) {
-        super(source, token, start, finish);
+    public UnaryNode(final long token, final int start, final int finish, final Expression rhs) {
+        super(token, start, finish);
         this.rhs = rhs;
     }
 
 
-    private UnaryNode(final UnaryNode unaryNode, final Node rhs) {
+    private UnaryNode(final UnaryNode unaryNode, final Expression rhs) {
         super(unaryNode);
         this.rhs = rhs;
     }
@@ -104,17 +102,17 @@ public final class UnaryNode extends Node implements Assignment<Node> {
     }
 
     @Override
-    public Node getAssignmentDest() {
+    public Expression getAssignmentDest() {
         return isAssignment() ? rhs() : null;
     }
 
     @Override
-    public Node setAssignmentDest(Node n) {
+    public UnaryNode setAssignmentDest(Expression n) {
         return setRHS(n);
     }
 
     @Override
-    public Node getAssignmentSource() {
+    public Expression getAssignmentSource() {
         return getAssignmentDest();
     }
 
@@ -123,9 +121,9 @@ public final class UnaryNode extends Node implements Assignment<Node> {
      * @param visitor IR navigating visitor.
      */
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterUnaryNode(this)) {
-            return visitor.leaveUnaryNode(setRHS(rhs.accept(visitor)));
+            return visitor.leaveUnaryNode(setRHS((Expression)rhs.accept(visitor)));
         }
 
         return this;
@@ -133,6 +131,22 @@ public final class UnaryNode extends Node implements Assignment<Node> {
 
     @Override
     public void toString(final StringBuilder sb) {
+        toString(sb, new Runnable() {
+            @Override
+            public void run() {
+                sb.append(rhs().toString());
+            }
+        });
+    }
+
+    /**
+     * Creates the string representation of this unary node, delegating the creation of the string representation of its
+     * operand to a specified runnable.
+     * @param sb the string builder to use
+     * @param rhsStringBuilder the runnable that appends the string representation of the operand to the string builder
+     * when invoked.
+     */
+    public void toString(final StringBuilder sb, final Runnable rhsStringBuilder) {
         final TokenType type      = tokenType();
         final String    name      = type.getName();
         final boolean   isPostfix = type == DECPOSTFIX || type == INCPOSTFIX;
@@ -164,7 +178,7 @@ public final class UnaryNode extends Node implements Assignment<Node> {
         if (rhsParen) {
             sb.append('(');
         }
-        rhs().toString(sb);
+        rhsStringBuilder.run();
         if (rhsParen) {
             sb.append(')');
         }
@@ -192,7 +206,7 @@ public final class UnaryNode extends Node implements Assignment<Node> {
      *
      * @return right hand side or expression node
      */
-    public Node rhs() {
+    public Expression rhs() {
         return rhs;
     }
 
@@ -205,7 +219,7 @@ public final class UnaryNode extends Node implements Assignment<Node> {
      * @param rhs right hand side or expression node
      * @return a node equivalent to this one except for the requested change.
      */
-    public UnaryNode setRHS(final Node rhs) {
+    public UnaryNode setRHS(final Expression rhs) {
         if (this.rhs == rhs) {
             return this;
         }

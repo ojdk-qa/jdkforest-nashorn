@@ -29,7 +29,6 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
-import java.util.ListIterator;
 
 /**
  * This is a subclass of lexical context used for filling
@@ -41,16 +40,16 @@ import java.util.ListIterator;
 public class BlockLexicalContext extends LexicalContext {
     /** statement stack, each block on the lexical context maintains one of these, which is
      *  committed to the block on pop */
-    private Deque<List<Node>> sstack = new ArrayDeque<>();
+    private Deque<List<Statement>> sstack = new ArrayDeque<>();
 
     /** Last non debug statement emitted in this context */
-    protected Node lastStatement;
+    protected Statement lastStatement;
 
     @Override
     public <T extends LexicalContextNode> T push(final T node) {
         T pushed = super.push(node);
         if (node instanceof Block) {
-            sstack.push(new ArrayList<Node>());
+            sstack.push(new ArrayList<Statement>());
         }
         return pushed;
     }
@@ -59,17 +58,28 @@ public class BlockLexicalContext extends LexicalContext {
      * Get the statement list from the stack, possibly filtered
      * @return statement list
      */
-    protected List<Node> popStatements() {
+    protected List<Statement> popStatements() {
         return sstack.pop();
     }
 
-    @Override
+    /**
+     * Override this method to perform some additional processing on the block after its statements have been set. By
+     * default does nothing and returns the original block.
+     * @param block the block to operate on
+     * @return a modified block.
+     */
+    protected Block afterSetStatements(Block block) {
+        return block;
+    }
+
     @SuppressWarnings("unchecked")
+    @Override
     public <T extends LexicalContextNode> T pop(final T node) {
         T expected = node;
         if (node instanceof Block) {
-            final List<Node> newStatements = popStatements();
+            final List<Statement> newStatements = popStatements();
             expected = (T)((Block)node).setStatements(this, newStatements);
+            expected = (T)afterSetStatements((Block)expected);
             if (!sstack.isEmpty()) {
                 lastStatement = lastStatement(sstack.peek());
             }
@@ -81,12 +91,10 @@ public class BlockLexicalContext extends LexicalContext {
      * Append a statement to the block being generated
      * @param statement statement to add
      */
-    public void appendStatement(final Node statement) {
+    public void appendStatement(final Statement statement) {
         assert statement != null;
         sstack.peek().add(statement);
-        if (!statement.isDebug()) {
-            lastStatement = statement;
-        }
+        lastStatement = statement;
     }
 
     /**
@@ -94,27 +102,22 @@ public class BlockLexicalContext extends LexicalContext {
      * @param statement statement to prepend
      * @return the prepended statement
      */
-    public Node prependStatement(final Node statement) {
+    public Node prependStatement(final Statement statement) {
         assert statement != null;
         sstack.peek().add(0, statement);
         return statement;
     }
 
     /**
-     * Get the last (non debug) statement that was emitted into a block
+     * Get the last statement that was emitted into a block
      * @return the last statement emitted
      */
-    public Node getLastStatement() {
+    public Statement getLastStatement() {
         return lastStatement;
     }
 
-    private static Node lastStatement(final List<Node> statements) {
-        for (final ListIterator<Node> iter = statements.listIterator(statements.size()); iter.hasPrevious(); ) {
-            final Node node = iter.previous();
-            if (!node.isDebug()) {
-                return node;
-            }
-        }
-        return null;
+    private static Statement lastStatement(final List<Statement> statements) {
+        final int s = statements.size();
+        return s == 0 ? null : statements.get(s - 1);
     }
 }

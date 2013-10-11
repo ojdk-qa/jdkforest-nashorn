@@ -25,33 +25,13 @@
 package jdk.nashorn.internal.ir;
 
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
+
 
 /**
- * Superclass for nodes that can be part of the lexical context
+ * Interface for nodes that can be part of the lexical context.
  * @see LexicalContext
  */
-public abstract class LexicalContextNode extends Node {
-    /**
-     * Constructor
-     *
-     * @param source source
-     * @param token  token
-     * @param finish finish
-     */
-    protected LexicalContextNode(final Source source, final long token, final int finish) {
-        super(source, token, finish);
-    }
-
-    /**
-     * Copy constructor
-     *
-     * @param node source node
-     */
-    protected LexicalContextNode(final LexicalContextNode node) {
-        super(node);
-    }
-
+public interface LexicalContextNode {
     /**
      * Accept function for the node given a lexical context. It must be prepared
      * to replace itself if present in the lexical context
@@ -61,13 +41,21 @@ public abstract class LexicalContextNode extends Node {
      *
      * @return new node or same node depending on state change
      */
-    protected abstract Node accept(final LexicalContext lc, final NodeVisitor visitor);
+    Node accept(final LexicalContext lc, final NodeVisitor<? extends LexicalContext> visitor);
 
-    @Override
-    public Node accept(final NodeVisitor visitor) {
-        final LexicalContext lc = visitor.getLexicalContext();
-        lc.push(this);
-        final LexicalContextNode newNode = (LexicalContextNode)accept(lc, visitor);
-        return lc.pop(newNode);
+    // Would be a default method on Java 8
+    /**
+     * Helper class for accept for items of this lexical context, delegates to the
+     * subclass accept and makes sure that the node is on the context before accepting
+     * and gets popped after accepting (and that the stack is consistent in that the
+     * node has been replaced with the possible new node resulting in visitation)
+     */
+    static class Acceptor {
+        static Node accept(final LexicalContextNode node, final NodeVisitor<? extends LexicalContext> visitor) {
+            final LexicalContext lc = visitor.getLexicalContext();
+            lc.push(node);
+            final LexicalContextNode newNode = (LexicalContextNode)node.accept(lc, visitor);
+            return (Node)lc.pop(newNode);
+        }
     }
 }

@@ -28,7 +28,6 @@ package jdk.nashorn.internal.ir;
 import jdk.nashorn.internal.codegen.Label;
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation of CASE clause.
@@ -37,7 +36,7 @@ import jdk.nashorn.internal.runtime.Source;
 @Immutable
 public final class CaseNode extends Node {
     /** Test expression. */
-    private final Node test;
+    private final Expression test;
 
     /** Statements. */
     private final Block body;
@@ -48,21 +47,20 @@ public final class CaseNode extends Node {
     /**
      * Constructors
      *
-     * @param source   the source
      * @param token    token
      * @param finish   finish
      * @param test     case test node, can be any node in JavaScript
      * @param body     case body
      */
-    public CaseNode(final Source source, final long token, final int finish, final Node test, final Block body) {
-        super(source, token, finish);
+    public CaseNode(final long token, final int finish, final Expression test, final Block body) {
+        super(token, finish);
 
         this.test  = test;
         this.body  = body;
         this.entry = new Label("entry");
     }
 
-    CaseNode(final CaseNode caseNode, final Node test, final Block body) {
+    CaseNode(final CaseNode caseNode, final Expression test, final Block body) {
         super(caseNode);
 
         this.test  = test;
@@ -80,9 +78,9 @@ public final class CaseNode extends Node {
      * @param visitor IR navigating visitor.
      */
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterCaseNode(this)) {
-            final Node  newTest = test == null ? null : test.accept(visitor);
+            final Expression newTest = test == null ? null : (Expression)test.accept(visitor);
             final Block newBody = body == null ? null : (Block)body.accept(visitor);
 
             return visitor.leaveCaseNode(setTest(newTest).setBody(newBody));
@@ -122,7 +120,7 @@ public final class CaseNode extends Node {
      * Get the test expression for this case node
      * @return the test
      */
-    public Node getTest() {
+    public Expression getTest() {
         return test;
     }
 
@@ -131,7 +129,7 @@ public final class CaseNode extends Node {
      * @param test new test expression
      * @return new or same CaseNode
      */
-    public CaseNode setTest(final Node test) {
+    public CaseNode setTest(final Expression test) {
         if (this.test == test) {
             return this;
         }

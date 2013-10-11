@@ -27,13 +27,12 @@ package jdk.nashorn.internal.ir;
 
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation for a labeled statement.
  */
 @Immutable
-public final class LabelNode extends LexicalContextNode {
+public final class LabelNode extends LexicalContextStatement {
     /** Label ident. */
     private final IdentNode label;
 
@@ -43,14 +42,14 @@ public final class LabelNode extends LexicalContextNode {
     /**
      * Constructor
      *
-     * @param source the source
-     * @param token  token
-     * @param finish finish
-     * @param label  label identifier
-     * @param body   body of label node
+     * @param lineNumber line number
+     * @param token      token
+     * @param finish     finish
+     * @param label      label identifier
+     * @param body       body of label node
      */
-    public LabelNode(final Source source, final long token, final int finish, final IdentNode label, final Block body) {
-        super(source, token, finish);
+    public LabelNode(final int lineNumber, final long token, final int finish, final IdentNode label, final Block body) {
+        super(lineNumber, token, finish);
 
         this.label = label;
         this.body  = body;
@@ -68,11 +67,11 @@ public final class LabelNode extends LexicalContextNode {
     }
 
     @Override
-    public Node accept(final LexicalContext lc, final NodeVisitor visitor) {
+    public Node accept(final LexicalContext lc, final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterLabelNode(this)) {
             return visitor.leaveLabelNode(
-                setLabel(visitor.getLexicalContext(), (IdentNode)label.accept(visitor)).
-                setBody(visitor.getLexicalContext(), (Block)body.accept(visitor)));
+                setLabel(lc, (IdentNode)label.accept(visitor)).
+                setBody(lc, (Block)body.accept(visitor)));
         }
 
         return this;

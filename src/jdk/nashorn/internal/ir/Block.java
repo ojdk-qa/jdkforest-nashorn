@@ -30,29 +30,33 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
 import jdk.nashorn.internal.codegen.Label;
+import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
+
+import static jdk.nashorn.internal.codegen.CompilerConstants.RETURN;
 
 /**
- * IR representation for a list of statements and functions. All provides the
- * basis for script body.
+ * IR representation for a list of statements.
  */
 @Immutable
-public class Block extends BreakableNode implements Flags<Block> {
+public class Block extends Node implements BreakableNode, Flags<Block> {
     /** List of statements */
-    protected final List<Node> statements;
+    protected final List<Statement> statements;
 
     /** Symbol table - keys must be returned in the order they were put in. */
     protected final Map<String, Symbol> symbols;
 
     /** Entry label. */
     protected final Label entryLabel;
+
+    /** Break label. */
+    private final Label breakLabel;
 
     /** Does the block/function need a new scope? */
     protected final int flags;
@@ -78,44 +82,53 @@ public class Block extends BreakableNode implements Flags<Block> {
     /**
      * Constructor
      *
-     * @param source     source code
      * @param token      token
      * @param finish     finish
      * @param statements statements
      */
-    public Block(final Source source, final long token, final int finish, final Node... statements) {
-        super(source, token, finish, new Label("block_break"));
+    public Block(final long token, final int finish, final Statement... statements) {
+        super(token, finish);
 
         this.statements = Arrays.asList(statements);
         this.symbols    = new LinkedHashMap<>();
         this.entryLabel = new Label("block_entry");
-        this.flags     =  0;
+        this.breakLabel = new Label("block_break");
+        final int len = statements.length;
+        this.flags = (len > 0 && statements[len - 1].hasTerminalFlags()) ? IS_TERMINAL : 0;
     }
 
     /**
      * Constructor
      *
-     * @param source     source code
      * @param token      token
      * @param finish     finish
      * @param statements statements
      */
-    public Block(final Source source, final long token, final int finish, final List<Node> statements) {
-        this(source, token, finish, statements.toArray(new Node[statements.size()]));
+    public Block(final long token, final int finish, final List<Statement> statements) {
+        this(token, finish, statements.toArray(new Statement[statements.size()]));
     }
 
-    private Block(final Block block, final int finish, final List<Node> statements, final int flags) {
+    private Block(final Block block, final int finish, final List<Statement> statements, final int flags, final Map<String, Symbol> symbols) {
         super(block);
         this.statements = statements;
         this.flags      = flags;
-        this.symbols    = block.symbols; //todo - symbols have no dependencies on any IR node and can as far as we understand it be shallow copied now
+        this.symbols    = new LinkedHashMap<>(symbols); //todo - symbols have no dependencies on any IR node and can as far as we understand it be shallow copied now
         this.entryLabel = new Label(block.entryLabel);
-        this.finish = finish;
+        this.breakLabel = new Label(block.breakLabel);
+        this.finish     = finish;
+    }
+
+    /**
+     * Clear the symbols in a block
+     * TODO: make this immutable
+     */
+    public void clearSymbols() {
+        symbols.clear();
     }
 
     @Override
     public Node ensureUniqueLabels(final LexicalContext lc) {
-        return Node.replaceInLexicalContext(lc, this, new Block(this, finish, statements, flags));
+        return Node.replaceInLexicalContext(lc, this, new Block(this, finish, statements, flags, symbols));
     }
 
     /**
@@ -125,9 +138,9 @@ public class Block extends BreakableNode implements Flags<Block> {
      * @return new or same node
      */
     @Override
-    public Node accept(final LexicalContext lc, final NodeVisitor visitor) {
+    public Node accept(final LexicalContext lc, final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterBlock(this)) {
-            return visitor.leaveBlock(setStatements(lc, Node.accept(visitor, Node.class, statements)));
+            return visitor.leaveBlock(setStatements(lc, Node.accept(visitor, Statement.class, statements)));
         }
 
         return this;
@@ -137,15 +150,15 @@ public class Block extends BreakableNode implements Flags<Block> {
      * Get an iterator for all the symbols defined in this block
      * @return symbol iterator
      */
-    public Iterator<Symbol> symbolIterator() {
-        return symbols.values().iterator();
+    public List<Symbol> getSymbols() {
+        return Collections.unmodifiableList(new ArrayList<>(symbols.values()));
     }
 
     /**
      * Retrieves an existing symbol defined in the current block.
      * @param name the name of the symbol
      * @return an existing symbol with the specified name defined in the current block, or null if this block doesn't
-     * define a symbol with this name.
+     * define a symbol with this name.T
      */
     public Symbol getExistingSymbol(final String name) {
         return symbols.get(name);
@@ -204,6 +217,19 @@ public class Block extends BreakableNode implements Flags<Block> {
         return isTerminal ? setFlag(lc, IS_TERMINAL) : clearFlag(lc, IS_TERMINAL);
     }
 
+    /**
+     * Set the type of the return symbol in this block if present.
+     * @param returnType the new type
+     * @return this block
+     */
+    public Block setReturnType(final Type returnType) {
+        final Symbol symbol = getExistingSymbol(RETURN.symbolName());
+        if (symbol != null) {
+            symbol.setTypeOverride(returnType);
+        }
+        return this;
+    }
+
     @Override
     public boolean isTerminal() {
         return getFlag(IS_TERMINAL);
@@ -217,12 +243,17 @@ public class Block extends BreakableNode implements Flags<Block> {
         return entryLabel;
     }
 
+    @Override
+    public Label getBreakLabel() {
+        return breakLabel;
+    }
+
     /**
      * Get the list of statements in this block
      *
      * @return a list of statements
      */
-    public List<Node> getStatements() {
+    public List<Statement> getStatements() {
         return Collections.unmodifiableList(statements);
     }
 
@@ -233,7 +264,7 @@ public class Block extends BreakableNode implements Flags<Block> {
      * @param statements new statement list
      * @return new block if statements changed, identity of statements == block.statements
      */
-    public Block setStatements(final LexicalContext lc, final List<Node> statements) {
+    public Block setStatements(final LexicalContext lc, final List<Statement> statements) {
         if (this.statements == statements) {
             return this;
         }
@@ -241,17 +272,17 @@ public class Block extends BreakableNode implements Flags<Block> {
         if (!statements.isEmpty()) {
             lastFinish = statements.get(statements.size() - 1).getFinish();
         }
-        return Node.replaceInLexicalContext(lc, this, new Block(this, Math.max(finish, lastFinish), statements, flags));
+        return Node.replaceInLexicalContext(lc, this, new Block(this, Math.max(finish, lastFinish), statements, flags, symbols));
     }
 
     /**
      * Add or overwrite an existing symbol in the block
      *
-     * @param name   name of symbol
+     * @param lc     get lexical context
      * @param symbol symbol
      */
-    public void putSymbol(final String name, final Symbol symbol) {
-        symbols.put(name, symbol);
+    public void putSymbol(final LexicalContext lc, final Symbol symbol) {
+        symbols.put(symbol.getName(), symbol);
     }
 
     /**
@@ -268,7 +299,7 @@ public class Block extends BreakableNode implements Flags<Block> {
         if (this.flags == flags) {
             return this;
         }
-        return Node.replaceInLexicalContext(lc, this, new Block(this, finish, statements, flags));
+        return Node.replaceInLexicalContext(lc, this, new Block(this, finish, statements, flags, symbols));
     }
 
     @Override
@@ -296,7 +327,7 @@ public class Block extends BreakableNode implements Flags<Block> {
             return this;
         }
 
-        return Node.replaceInLexicalContext(lc, this, new Block(this, finish, statements, flags | NEEDS_SCOPE));
+        return Node.replaceInLexicalContext(lc, this, new Block(this, finish, statements, flags | NEEDS_SCOPE, symbols));
     }
 
     /**
@@ -306,19 +337,27 @@ public class Block extends BreakableNode implements Flags<Block> {
      * @return next slot
      */
     public int nextSlot() {
-        final Iterator<Symbol> iter = symbolIterator();
         int next = 0;
-        while (iter.hasNext()) {
-        final Symbol symbol = iter.next();
-        if (symbol.hasSlot()) {
-            next += symbol.slotCount();
-        }
+        for (final Symbol symbol : getSymbols()) {
+            if (symbol.hasSlot()) {
+                next += symbol.slotCount();
+            }
         }
         return next;
     }
 
     @Override
-    protected boolean isBreakableWithoutLabel() {
+    public boolean isBreakableWithoutLabel() {
         return false;
+    }
+
+    @Override
+    public List<Label> getLabels() {
+        return Collections.singletonList(breakLabel);
+    }
+
+    @Override
+    public Node accept(NodeVisitor<? extends LexicalContext> visitor) {
+        return Acceptor.accept(this, visitor);
     }
 }

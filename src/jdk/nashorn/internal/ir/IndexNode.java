@@ -28,7 +28,6 @@ package jdk.nashorn.internal.ir;
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation of an indexed access (brackets operator.)
@@ -36,41 +35,33 @@ import jdk.nashorn.internal.runtime.Source;
 @Immutable
 public final class IndexNode extends BaseNode {
     /** Property index. */
-    private final Node index;
+    private final Expression index;
 
     /**
      * Constructors
      *
-     * @param source  the source
      * @param token   token
      * @param finish  finish
      * @param base    base node for access
      * @param index   index for access
      */
-    public IndexNode(final Source source, final long token, final int finish, final Node base, final Node index) {
-        super(source, token, finish, base, false, false);
+    public IndexNode(final long token, final int finish, final Expression base, final Expression index) {
+        super(token, finish, base, false, false);
         this.index = index;
     }
 
-    private IndexNode(final IndexNode indexNode, final Node base, final Node index, final boolean isFunction, final boolean hasCallSiteType) {
+    private IndexNode(final IndexNode indexNode, final Expression base, final Expression index, final boolean isFunction, final boolean hasCallSiteType) {
         super(indexNode, base, isFunction, hasCallSiteType);
         this.index = index;
     }
 
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterIndexNode(this)) {
-            final Node      newBase  = base.accept(visitor);
-            final Node      newIndex = index.accept(visitor);
-            final IndexNode newNode;
-            if (newBase != base || newIndex != index) {
-                newNode = new IndexNode(this, newBase, newIndex, isFunction(), hasCallSiteType());
-            } else {
-                newNode = this;
-            }
-            return visitor.leaveIndexNode(newNode);
+            return visitor.leaveIndexNode(
+                setBase((Expression)base.accept(visitor)).
+                setIndex((Expression)index.accept(visitor)));
         }
-
         return this;
     }
 
@@ -104,8 +95,27 @@ public final class IndexNode extends BaseNode {
      * Get the index expression for this IndexNode
      * @return the index
      */
-    public Node getIndex() {
+    public Expression getIndex() {
         return index;
+    }
+
+    private IndexNode setBase(final Expression base) {
+        if (this.base == base) {
+            return this;
+        }
+        return new IndexNode(this, base, index, isFunction(), hasCallSiteType());
+    }
+
+    /**
+     * Set the index expression for this node
+     * @param index new index expression
+     * @return a node equivalent to this one except for the requested change.
+     */
+    public IndexNode setIndex(Expression index) {
+        if(this.index == index) {
+            return this;
+        }
+        return new IndexNode(this, base, index, isFunction(), hasCallSiteType());
     }
 
     @Override
@@ -117,10 +127,10 @@ public final class IndexNode extends BaseNode {
     }
 
     @Override
-    public IndexNode setType(final Type type) {
+    public IndexNode setType(final TemporarySymbols ts, final LexicalContext lc, final Type type) {
         logTypeChange(type);
-        getSymbol().setTypeOverride(type); //always a temp so this is fine.
-        return new IndexNode(this, base, index, isFunction(), true);
+        final IndexNode newIndexNode = (IndexNode)setSymbol(lc, getSymbol().setTypeOverrideShared(type, ts));
+        return new IndexNode(newIndexNode, base, index, isFunction(), true);
     }
 
 }

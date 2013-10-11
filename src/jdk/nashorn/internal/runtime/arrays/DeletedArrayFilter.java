@@ -44,6 +44,13 @@ final class DeletedArrayFilter extends ArrayFilter {
     }
 
     @Override
+    public ArrayData copy() {
+        DeletedArrayFilter copy = new DeletedArrayFilter(underlying.copy());
+        copy.getDeleted().copy(deleted);
+        return copy;
+    }
+
+    @Override
     public Object[] asObjectArray() {
         final Object[] value = super.asObjectArray();
 
@@ -142,6 +149,7 @@ final class DeletedArrayFilter extends ArrayFilter {
         final long longIndex = ArrayIndex.toLongIndex(index);
         assert longIndex >= 0 && longIndex < length();
         deleted.set(longIndex);
+        underlying.setEmpty(index);
         return this;
     }
 
@@ -149,6 +157,7 @@ final class DeletedArrayFilter extends ArrayFilter {
     public ArrayData delete(final long fromIndex, final long toIndex) {
         assert fromIndex >= 0 && fromIndex <= toIndex && toIndex < length();
         deleted.setRange(fromIndex, toIndex + 1);
+        underlying.setEmpty(fromIndex, toIndex);
         return this;
     }
 

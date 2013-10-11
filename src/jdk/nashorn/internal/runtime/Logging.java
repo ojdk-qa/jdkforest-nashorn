@@ -25,7 +25,13 @@
 
 package jdk.nashorn.internal.runtime;
 
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.Permissions;
+import java.security.PrivilegedAction;
+import java.security.ProtectionDomain;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.logging.ConsoleHandler;
@@ -34,6 +40,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.logging.LoggingPermission;
 
 /**
  * Logging system for getting loggers for arbitrary subsystems as
@@ -49,12 +56,20 @@ public final class Logging {
 
     private static final Logger disabledLogger = Logger.getLogger("disabled");
 
+    private static AccessControlContext createLoggerControlAccCtxt() {
+        final Permissions perms = new Permissions();
+        perms.add(new LoggingPermission("control", null));
+        return new AccessControlContext(new ProtectionDomain[] { new ProtectionDomain(null, perms) });
+    }
+
     static {
-        try {
-            Logging.disabledLogger.setLevel(Level.OFF);
-        } catch (final SecurityException e) {
-            //ignored
-        }
+        AccessController.doPrivileged(new PrivilegedAction<Void>() {
+            @Override
+            public Void run() {
+                Logging.disabledLogger.setLevel(Level.OFF);
+                return null;
+            }
+        }, createLoggerControlAccCtxt());
     }
 
     /** Maps logger name to loggers. Names are typically per package */
@@ -117,7 +132,7 @@ public final class Logging {
                 if ("".equals(value)) {
                     level = Level.INFO;
                 } else {
-                    level = Level.parse(value.toUpperCase());
+                    level = Level.parse(value.toUpperCase(Locale.ENGLISH));
                 }
 
                 final String name = Logging.lastPart(key);

@@ -33,11 +33,14 @@ import jdk.nashorn.internal.runtime.ScriptObject;
  */
 public class JO extends ScriptObject {
 
+    private static final PropertyMap map$ = PropertyMap.newMap().setIsShared();
+
     /**
-     * Constructor
+     * Returns the initial property map to be used.
+     * @return the initial property map.
      */
-    public JO() {
-        super();
+    public static PropertyMap getInitialMap() {
+        return map$;
     }
 
     /**
@@ -50,7 +53,17 @@ public class JO extends ScriptObject {
     }
 
     /**
-     * Used by FunctionObjectCreator. A method handle of this method is passed to the ScriptFunction constructor.
+     * Constructor given an initial prototype and an initial property map.
+     *
+     * @param proto the prototype object
+     * @param map the property map
+     */
+    public JO(final ScriptObject proto, final PropertyMap map) {
+        super(proto, map);
+    }
+
+    /**
+     * A method handle of this method is passed to the ScriptFunction constructor.
      *
      * @param map  the property map to use for allocatorMap
      *

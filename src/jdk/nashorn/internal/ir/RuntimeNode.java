@@ -33,13 +33,12 @@ import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.parser.TokenType;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation for a runtime call.
  */
 @Immutable
-public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
+public class RuntimeNode extends Expression implements TypeOverride<RuntimeNode> {
 
     /**
      * Request enum used for meta-information about the runtime request
@@ -53,8 +52,6 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
         NEW,
         /** Typeof operator */
         TYPEOF,
-        /** void type */
-        VOID,
         /** Reference error type */
         REFERENCE_ERROR,
         /** Delete operator */
@@ -269,7 +266,7 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
     private final Request request;
 
     /** Call arguments. */
-    private final List<Node> args;
+    private final List<Expression> args;
 
     /** Call site override - e.g. we know that a ScriptRuntime.ADD will return an int */
     private final Type callSiteType;
@@ -280,14 +277,13 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
     /**
      * Constructor
      *
-     * @param source  the source
      * @param token   token
      * @param finish  finish
      * @param request the request
      * @param args    arguments to request
      */
-    public RuntimeNode(final Source source, final long token, final int finish, final Request request, final List<Node> args) {
-        super(source, token, finish);
+    public RuntimeNode(final long token, final int finish, final Request request, final List<Expression> args) {
+        super(token, finish);
 
         this.request      = request;
         this.args         = args;
@@ -295,7 +291,7 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
         this.isFinal      = false;
     }
 
-    private RuntimeNode(final RuntimeNode runtimeNode, final Request request, final Type callSiteType, final boolean isFinal, final List<Node> args) {
+    private RuntimeNode(final RuntimeNode runtimeNode, final Request request, final Type callSiteType, final boolean isFinal, final List<Expression> args) {
         super(runtimeNode);
 
         this.request      = request;
@@ -307,14 +303,13 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
     /**
      * Constructor
      *
-     * @param source  the source
      * @param token   token
      * @param finish  finish
      * @param request the request
      * @param args    arguments to request
      */
-    public RuntimeNode(final Source source, final long token, final int finish, final Request request, final Node... args) {
-        this(source, token, finish, request, Arrays.asList(args));
+    public RuntimeNode(final long token, final int finish, final Request request, final Expression... args) {
+        this(token, finish, request, Arrays.asList(args));
     }
 
     /**
@@ -324,7 +319,7 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
      * @param request the request
      * @param args    arguments to request
      */
-    public RuntimeNode(final Node parent, final Request request, final Node... args) {
+    public RuntimeNode(final Expression parent, final Request request, final Expression... args) {
         this(parent, request, Arrays.asList(args));
     }
 
@@ -335,7 +330,7 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
      * @param request the request
      * @param args    arguments to request
      */
-    public RuntimeNode(final Node parent, final Request request, final List<Node> args) {
+    public RuntimeNode(final Expression parent, final Request request, final List<Expression> args) {
         super(parent);
 
         this.request      = request;
@@ -393,7 +388,7 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
     }
 
     @Override
-    public RuntimeNode setType(final Type type) {
+    public RuntimeNode setType(final TemporarySymbols ts, final LexicalContext lc, final Type type) {
         if (this.callSiteType == type) {
             return this;
         }
@@ -410,11 +405,11 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
     }
 
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterRuntimeNode(this)) {
-            final List<Node> newArgs = new ArrayList<>();
+            final List<Expression> newArgs = new ArrayList<>();
             for (final Node arg : args) {
-                newArgs.add(arg.accept(visitor));
+                newArgs.add((Expression)arg.accept(visitor));
             }
             return visitor.leaveRuntimeNode(setArgs(newArgs));
         }
@@ -447,11 +442,11 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
      * Get the arguments for this runtime node
      * @return argument list
      */
-    public List<Node> getArgs() {
+    public List<Expression> getArgs() {
         return Collections.unmodifiableList(args);
     }
 
-    private RuntimeNode setArgs(final List<Node> args) {
+    private RuntimeNode setArgs(final List<Expression> args) {
         if (this.args == args) {
             return this;
         }
@@ -474,7 +469,7 @@ public class RuntimeNode extends Node implements TypeOverride<RuntimeNode> {
      * @return true if all arguments now are primitive
      */
     public boolean isPrimitive() {
-        for (final Node arg : args) {
+        for (final Expression arg : args) {
             if (arg.getType().isObject()) {
                 return false;
             }

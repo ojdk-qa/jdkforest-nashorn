@@ -28,13 +28,14 @@ package jdk.nashorn.internal.ir.visitor;
 import jdk.nashorn.internal.ir.AccessNode;
 import jdk.nashorn.internal.ir.BinaryNode;
 import jdk.nashorn.internal.ir.Block;
+import jdk.nashorn.internal.ir.BlockStatement;
 import jdk.nashorn.internal.ir.BreakNode;
 import jdk.nashorn.internal.ir.CallNode;
 import jdk.nashorn.internal.ir.CaseNode;
 import jdk.nashorn.internal.ir.CatchNode;
 import jdk.nashorn.internal.ir.ContinueNode;
 import jdk.nashorn.internal.ir.EmptyNode;
-import jdk.nashorn.internal.ir.ExecuteNode;
+import jdk.nashorn.internal.ir.ExpressionStatement;
 import jdk.nashorn.internal.ir.ForNode;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.IdentNode;
@@ -42,7 +43,6 @@ import jdk.nashorn.internal.ir.IfNode;
 import jdk.nashorn.internal.ir.IndexNode;
 import jdk.nashorn.internal.ir.LabelNode;
 import jdk.nashorn.internal.ir.LexicalContext;
-import jdk.nashorn.internal.ir.LineNumberNode;
 import jdk.nashorn.internal.ir.LiteralNode;
 import jdk.nashorn.internal.ir.Node;
 import jdk.nashorn.internal.ir.ObjectNode;
@@ -61,23 +61,18 @@ import jdk.nashorn.internal.ir.WithNode;
 
 /**
  * Visitor used to navigate the IR.
+ * @param <T> lexical context class used by this visitor
  */
-public abstract class NodeVisitor {
-    private final LexicalContext lc;
-
-    /**
-     * Constructor
-     */
-    public NodeVisitor() {
-        this(new LexicalContext());
-    }
+public abstract class NodeVisitor<T extends LexicalContext> {
+    /** lexical context in use */
+    protected final T lc;
 
     /**
      * Constructor
      *
      * @param lc a custom lexical context
      */
-    public NodeVisitor(final LexicalContext lc) {
+    public NodeVisitor(final T lc) {
         this.lc = lc;
     }
 
@@ -85,7 +80,7 @@ public abstract class NodeVisitor {
      * Get the lexical context of this node visitor
      * @return lexical context
      */
-    public LexicalContext getLexicalContext() {
+    public T getLexicalContext() {
         return lc;
     }
 
@@ -314,23 +309,43 @@ public abstract class NodeVisitor {
     }
 
     /**
-     * Callback for entering an ExecuteNode
+     * Callback for entering an ExpressionStatement
      *
-     * @param  executeNode the node
+     * @param  expressionStatement the node
      * @return true if traversal should continue and node children be traversed, false otherwise
      */
-    public boolean enterExecuteNode(final ExecuteNode executeNode) {
-        return enterDefault(executeNode);
+    public boolean enterExpressionStatement(final ExpressionStatement expressionStatement) {
+        return enterDefault(expressionStatement);
     }
 
     /**
-     * Callback for leaving an ExecuteNode
+     * Callback for leaving an ExpressionStatement
      *
-     * @param  executeNode the node
+     * @param  expressionStatement the node
      * @return processed node, which will replace the original one, or the original node
      */
-    public Node leaveExecuteNode(final ExecuteNode executeNode) {
-        return leaveDefault(executeNode);
+    public Node leaveExpressionStatement(final ExpressionStatement expressionStatement) {
+        return leaveDefault(expressionStatement);
+    }
+
+    /**
+     * Callback for entering a BlockStatement
+     *
+     * @param  blockStatement the node
+     * @return true if traversal should continue and node children be traversed, false otherwise
+     */
+    public boolean enterBlockStatement(final BlockStatement blockStatement) {
+        return enterDefault(blockStatement);
+    }
+
+    /**
+     * Callback for leaving a BlockStatement
+     *
+     * @param  blockStatement the node
+     * @return processed node, which will replace the original one, or the original node
+     */
+    public Node leaveBlockStatement(final BlockStatement blockStatement) {
+        return leaveDefault(blockStatement);
     }
 
     /**
@@ -451,26 +466,6 @@ public abstract class NodeVisitor {
      */
     public Node leaveLabelNode(final LabelNode labelNode) {
         return leaveDefault(labelNode);
-    }
-
-    /**
-     * Callback for entering a LineNumberNode
-     *
-     * @param  lineNumberNode the node
-     * @return true if traversal should continue and node children be traversed, false otherwise
-     */
-    public boolean enterLineNumberNode(final LineNumberNode lineNumberNode) {
-        return enterDefault(lineNumberNode);
-    }
-
-    /**
-     * Callback for leaving a LineNumberNode
-     *
-     * @param  lineNumberNode the node
-     * @return processed node, which will replace the original one, or the original node
-     */
-    public Node leaveLineNumberNode(final LineNumberNode lineNumberNode) {
-        return leaveDefault(lineNumberNode);
     }
 
     /**

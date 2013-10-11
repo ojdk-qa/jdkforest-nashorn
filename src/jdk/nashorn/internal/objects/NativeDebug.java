@@ -47,8 +47,14 @@ import jdk.nashorn.internal.runtime.linker.LinkerCallSite;
  */
 @ScriptClass("Debug")
 public final class NativeDebug extends ScriptObject {
-    NativeDebug() {
-        this.setProto(Global.objectPrototype());
+
+    // initialized by nasgen
+    @SuppressWarnings("unused")
+    private static PropertyMap $nasgenmap$;
+
+    private NativeDebug() {
+        // don't create me!
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -66,7 +72,7 @@ public final class NativeDebug extends ScriptObject {
     public static Object getContext(final Object self) {
         final SecurityManager sm = System.getSecurityManager();
         if (sm != null) {
-            sm.checkPermission(new RuntimePermission("nashorn.getContext"));
+            sm.checkPermission(new RuntimePermission(Context.NASHORN_GET_CONTEXT));
         }
         return Global.getThisContext();
     }
@@ -82,66 +88,6 @@ public final class NativeDebug extends ScriptObject {
     public static Object map(final Object self, final Object obj) {
         if (obj instanceof ScriptObject) {
             return ((ScriptObject)obj).getMap();
-        }
-        return UNDEFINED;
-    }
-
-    /**
-     * Nashorn extension: get embed0 from {@link ScriptObject}
-     *
-     * @param self self reference
-     * @param obj script object
-     * @return the embed0 property value for the given ScriptObject
-     */
-    @Function(attributes = Attribute.NOT_ENUMERABLE, where = Where.CONSTRUCTOR)
-    public static Object embed0(final Object self, final Object obj) {
-        if (obj instanceof ScriptObject) {
-            return ((ScriptObject)obj).embed0;
-        }
-        return UNDEFINED;
-    }
-
-    /**
-     * Nashorn extension: get embed1 from {@link ScriptObject}
-     *
-     * @param self self reference
-     * @param obj script object
-     * @return the embed1 property value for the given ScriptObject
-     */
-    @Function(attributes = Attribute.NOT_ENUMERABLE, where = Where.CONSTRUCTOR)
-    public static Object embed1(final Object self, final Object obj) {
-        if (obj instanceof ScriptObject) {
-            return ((ScriptObject)obj).embed1;
-        }
-        return UNDEFINED;
-    }
-
-    /**
-     * Nashorn extension: get embed2 from {@link ScriptObject}
-     *
-     * @param self self reference
-     * @param obj script object
-     * @return the embed2 property value for the given ScriptObject
-     */
-    @Function(attributes = Attribute.NOT_ENUMERABLE, where = Where.CONSTRUCTOR)
-    public static Object embed2(final Object self, final Object obj) {
-        if (obj instanceof ScriptObject) {
-            return ((ScriptObject)obj).embed2;
-        }
-        return UNDEFINED;
-    }
-
-    /**
-     * Nashorn extension: get embed3 from {@link ScriptObject}
-     *
-     * @param self self reference
-     * @param obj script object
-     * @return the embed3 property value for the given ScriptObject
-     */
-    @Function(attributes = Attribute.NOT_ENUMERABLE, where = Where.CONSTRUCTOR)
-    public static Object embed3(final Object self, final Object obj) {
-        if (obj instanceof ScriptObject) {
-            return ((ScriptObject)obj).embed3;
         }
         return UNDEFINED;
     }
@@ -199,7 +145,7 @@ public final class NativeDebug extends ScriptObject {
      */
     @Function(attributes = Attribute.NOT_ENUMERABLE, where = Where.CONSTRUCTOR)
     public static Object equals(final Object self, final Object obj1, final Object obj2) {
-        return (obj1 != null) ? obj1.equals(obj2) : false;
+        return Objects.equals(obj1, obj2);
     }
 
     /**
@@ -232,6 +178,18 @@ public final class NativeDebug extends ScriptObject {
     }
 
     /**
+     * Returns the property listener count for a script object
+     *
+     * @param self self reference
+     * @param obj  script object whose listener count is returned
+     * @return listener count
+     */
+    @Function(attributes = Attribute.NOT_ENUMERABLE, where = Where.CONSTRUCTOR)
+    public static Object getListenerCount(final Object self, final Object obj) {
+        return (obj instanceof ScriptObject)? ((ScriptObject)obj).getListenerCount() : 0;
+    }
+
+    /**
      * Dump all Nashorn debug mode counters. Calling this may be better if
      * you want to print all counters. This way you can avoid too many callsites
      * due to counter access itself!!
@@ -247,11 +205,13 @@ public final class NativeDebug extends ScriptObject {
         out.println("Scope count " + ScriptObject.getScopeCount());
         out.println("ScriptObject listeners added " + PropertyListenerManager.getListenersAdded());
         out.println("ScriptObject listeners removed " + PropertyListenerManager.getListenersRemoved());
-        out.println("ScriptFunction count " + ScriptObject.getCount());
+        out.println("ScriptFunction constructor calls " + ScriptFunction.getConstructorCount());
         out.println("ScriptFunction invokes " + ScriptFunction.getInvokes());
         out.println("ScriptFunction allocations " + ScriptFunction.getAllocations());
         out.println("PropertyMap count " + PropertyMap.getCount());
         out.println("PropertyMap cloned " + PropertyMap.getClonedCount());
+        out.println("PropertyMap shared " + PropertyMap.getSharedCount());
+        out.println("PropertyMap duplicated " + PropertyMap.getDuplicatedCount());
         out.println("PropertyMap history hit " + PropertyMap.getHistoryHit());
         out.println("PropertyMap proto invalidations " + PropertyMap.getProtoInvalidations());
         out.println("PropertyMap proto history hit " + PropertyMap.getProtoHistoryHit());

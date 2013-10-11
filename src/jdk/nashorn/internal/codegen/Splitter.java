@@ -40,20 +40,20 @@ import jdk.nashorn.internal.ir.LiteralNode.ArrayLiteralNode;
 import jdk.nashorn.internal.ir.LiteralNode.ArrayLiteralNode.ArrayUnit;
 import jdk.nashorn.internal.ir.Node;
 import jdk.nashorn.internal.ir.SplitNode;
+import jdk.nashorn.internal.ir.Statement;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.runtime.DebugLogger;
-import jdk.nashorn.internal.runtime.Source;
 import jdk.nashorn.internal.runtime.options.Options;
 
 /**
  * Split the IR into smaller compile units.
  */
-final class Splitter extends NodeVisitor {
+final class Splitter extends NodeVisitor<LexicalContext> {
     /** Current compiler. */
     private final Compiler compiler;
 
     /** IR to be broken down. */
-    private FunctionNode outermost;
+    private final FunctionNode outermost;
 
     /** Compile unit for the main script. */
     private final CompileUnit outermostCompileUnit;
@@ -74,8 +74,9 @@ final class Splitter extends NodeVisitor {
      * @param outermostCompileUnit  compile unit for outermost function, if non-lazy this is the script's compile unit
      */
     public Splitter(final Compiler compiler, final FunctionNode functionNode, final CompileUnit outermostCompileUnit) {
+        super(new LexicalContext());
         this.compiler             = compiler;
-        this.outermost = functionNode;
+        this.outermost            = functionNode;
         this.outermostCompileUnit = outermostCompileUnit;
     }
 
@@ -92,10 +93,12 @@ final class Splitter extends NodeVisitor {
 
         LOG.finest("Initiating split of '", functionNode.getName(), "'");
 
-        final LexicalContext lc = getLexicalContext();
-
         long weight = WeighNodes.weigh(functionNode);
-        final boolean top = compiler.getFunctionNode() == outermost;
+        final boolean top = fn.isProgram(); //compiler.getFunctionNode() == outermost;
+
+        // We know that our LexicalContext is empty outside the call to functionNode.accept(this) below,
+        // so we can pass null to all methods expecting a LexicalContext parameter.
+        assert lc.isEmpty() : "LexicalContext not empty";
 
         if (weight >= SPLIT_THRESHOLD) {
             LOG.finest("Splitting '", functionNode.getName(), "' as its weight ", weight, " exceeds split threshold ", SPLIT_THRESHOLD);
@@ -104,11 +107,12 @@ final class Splitter extends NodeVisitor {
             if (functionNode.isSplit()) {
                 // Weight has changed so weigh again, this time using block weight cache
                 weight = WeighNodes.weigh(functionNode, weightCache);
-                functionNode = functionNode.setBody(lc, functionNode.getBody().setNeedsScope(lc));
+                functionNode = functionNode.setBody(null, functionNode.getBody().setNeedsScope(null));
             }
 
             if (weight >= SPLIT_THRESHOLD) {
-                functionNode = functionNode.setBody(lc, splitBlock(functionNode.getBody(), functionNode));
+                functionNode = functionNode.setBody(null, splitBlock(functionNode.getBody(), functionNode));
+                functionNode = functionNode.setFlag(null, FunctionNode.IS_SPLIT);
                 weight = WeighNodes.weigh(functionNode.getBody(), weightCache);
             }
         }
@@ -117,44 +121,44 @@ final class Splitter extends NodeVisitor {
 
         if (top) {
             assert outermostCompileUnit != null : "outermost compile unit is null";
-            functionNode = functionNode.setCompileUnit(lc, outermostCompileUnit);
+            functionNode = functionNode.setCompileUnit(null, outermostCompileUnit);
             outermostCompileUnit.addWeight(weight + WeighNodes.FUNCTION_WEIGHT);
         } else {
-            functionNode = functionNode.setCompileUnit(lc, findUnit(weight));
+            functionNode = functionNode.setCompileUnit(null, findUnit(weight));
         }
 
         final Block body = functionNode.getBody();
         final List<FunctionNode> dc = directChildren(functionNode);
 
-        final Block newBody = (Block)body.accept(new NodeVisitor() {
-                @Override
-                public boolean enterFunctionNode(final FunctionNode nestedFunction) {
-                    return dc.contains(nestedFunction);
-                }
+        final Block newBody = (Block)body.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
+            @Override
+            public boolean enterFunctionNode(final FunctionNode nestedFunction) {
+                return dc.contains(nestedFunction);
+            }
 
-                @Override
-                public Node leaveFunctionNode(final FunctionNode nestedFunction) {
-                    FunctionNode split = new Splitter(compiler, nestedFunction, outermostCompileUnit).split(nestedFunction);
-                    getLexicalContext().replace(nestedFunction, split);
-                    return split;
-                }
-            });
-        functionNode = functionNode.setBody(lc, newBody);
+            @Override
+            public Node leaveFunctionNode(final FunctionNode nestedFunction) {
+                FunctionNode split = new Splitter(compiler, nestedFunction, outermostCompileUnit).split(nestedFunction);
+                lc.replace(nestedFunction, split);
+                return split;
+            }
+        });
+        functionNode = functionNode.setBody(null, newBody);
 
         assert functionNode.getCompileUnit() != null;
 
-        return functionNode.setState(lc, CompilationState.SPLIT);
+        return functionNode.setState(null, CompilationState.SPLIT);
     }
 
     private static List<FunctionNode> directChildren(final FunctionNode functionNode) {
         final List<FunctionNode> dc = new ArrayList<>();
-        functionNode.accept(new NodeVisitor() {
+        functionNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
             @Override
             public boolean enterFunctionNode(final FunctionNode child) {
                 if (child == functionNode) {
                     return true;
                 }
-                if (getLexicalContext().getParentFunction(child) == functionNode) {
+                if (lc.getParentFunction(child) == functionNode) {
                     dc.add(child);
                 }
                 return false;
@@ -180,13 +184,12 @@ final class Splitter extends NodeVisitor {
      * @return new weight for the resulting block.
      */
     private Block splitBlock(final Block block, final FunctionNode function) {
-        getLexicalContext().setFlag(getLexicalContext().getCurrentFunction(), FunctionNode.IS_SPLIT);
 
-        final List<Node> splits = new ArrayList<>();
-        List<Node> statements = new ArrayList<>();
+        final List<Statement> splits = new ArrayList<>();
+        List<Statement> statements = new ArrayList<>();
         long statementsWeight = 0;
 
-        for (final Node statement : block.getStatements()) {
+        for (final Statement statement : block.getStatements()) {
             final long weight = WeighNodes.weigh(statement, weightCache);
 
             if (statementsWeight + weight >= SPLIT_THRESHOLD || statement.isTerminal()) {
@@ -209,7 +212,7 @@ final class Splitter extends NodeVisitor {
             splits.add(createBlockSplitNode(block, function, statements, statementsWeight));
         }
 
-        return block.setStatements(getLexicalContext(), splits);
+        return block.setStatements(lc, splits);
     }
 
     /**
@@ -220,13 +223,12 @@ final class Splitter extends NodeVisitor {
      *
      * @return New split node.
      */
-    private SplitNode createBlockSplitNode(final Block parent, final FunctionNode function, final List<Node> statements, final long weight) {
-        final Source source = parent.getSource();
-        final long   token  = parent.getToken();
-        final int    finish = parent.getFinish();
-        final String name   = function.uniqueName(SPLIT_PREFIX.symbolName());
+    private SplitNode createBlockSplitNode(final Block parent, final FunctionNode function, final List<Statement> statements, final long weight) {
+        final long   token      = parent.getToken();
+        final int    finish     = parent.getFinish();
+        final String name       = function.uniqueName(SPLIT_PREFIX.symbolName());
 
-        final Block newBlock = new Block(source, token, finish, statements);
+        final Block newBlock = new Block(token, finish, statements);
 
         return new SplitNode(name, newBlock, compiler.findUnit(weight + WeighNodes.FUNCTION_WEIGHT));
     }
@@ -257,8 +259,10 @@ final class Splitter extends NodeVisitor {
         // been split already, so weigh again before splitting.
         long weight = WeighNodes.weigh(block, weightCache);
         if (weight >= SPLIT_THRESHOLD) {
-            newBlock = splitBlock(block, getLexicalContext().getFunction(block));
+            final FunctionNode currentFunction = lc.getCurrentFunction();
+            newBlock = splitBlock(block, currentFunction);
             weight   = WeighNodes.weigh(newBlock, weightCache);
+            lc.setFlag(currentFunction, FunctionNode.IS_SPLIT);
         }
         weightCache.put(newBlock, weight);
         return newBlock;
@@ -273,7 +277,9 @@ final class Splitter extends NodeVisitor {
             return literal;
         }
 
-        getLexicalContext().setFlag(getLexicalContext().getCurrentFunction(), FunctionNode.IS_SPLIT);
+        final FunctionNode functionNode = lc.getCurrentFunction();
+
+        lc.setFlag(functionNode, FunctionNode.IS_SPLIT);
 
         if (literal instanceof ArrayLiteralNode) {
             final ArrayLiteralNode arrayLiteralNode = (ArrayLiteralNode) literal;
@@ -289,7 +295,7 @@ final class Splitter extends NodeVisitor {
                 final Node element = value[postset];
 
                 weight = WeighNodes.weigh(element);
-                totalWeight += weight;
+                totalWeight += WeighNodes.AASTORE_WEIGHT + weight;
 
                 if (totalWeight >= SPLIT_THRESHOLD) {
                     final CompileUnit unit = compiler.findUnit(totalWeight - weight);

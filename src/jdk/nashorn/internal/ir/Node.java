@@ -27,35 +27,32 @@ package jdk.nashorn.internal.ir;
 
 import java.util.ArrayList;
 import java.util.List;
-
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.parser.Token;
-import jdk.nashorn.internal.runtime.Source;
+import jdk.nashorn.internal.parser.TokenType;
 
 /**
  * Nodes are used to compose Abstract Syntax Trees.
  */
-public abstract class Node extends Location {
-    /** Node symbol. */
-    private Symbol symbol;
-
+public abstract class Node implements Cloneable {
     /** Start of source range. */
     protected final int start;
 
     /** End of source range. */
     protected int finish;
 
+    /** Token descriptor. */
+    private final long token;
+
     /**
      * Constructor
      *
-     * @param source the source
      * @param token  token
      * @param finish finish
      */
-    public Node(final Source source, final long token, final int finish) {
-        super(source, token);
-
+    public Node(final long token, final int finish) {
+        this.token  = token;
         this.start  = Token.descPosition(token);
         this.finish = finish;
     }
@@ -63,16 +60,14 @@ public abstract class Node extends Location {
     /**
      * Constructor
      *
-     * @param source  source
      * @param token   token
      * @param start   start
      * @param finish  finish
      */
-    protected Node(final Source source, final long token, final int start, final int finish) {
-        super(source, token);
-
+    protected Node(final long token, final int start, final int finish) {
         this.start = start;
         this.finish = finish;
+        this.token = token;
     }
 
     /**
@@ -81,33 +76,9 @@ public abstract class Node extends Location {
      * @param node source node
      */
     protected Node(final Node node) {
-        super(node);
-
-        this.symbol = node.symbol;
+        this.token  = node.token;
         this.start  = node.start;
         this.finish = node.finish;
-    }
-
-    /**
-     * Check if the node has a type. The default behavior is to go into the symbol
-     * and check the symbol type, but there may be overrides, for example in
-     * getters that require a different type than the internal representation
-     *
-     * @return true if a type exists
-     */
-    public boolean hasType() {
-        return getSymbol() != null;
-    }
-
-    /**
-     * Returns the type of the node. Typically this is the symbol type. No types
-     * are stored in the node itself, unless it implements TypeOverride
-     *
-     * @return the type of the node.
-     */
-    public Type getType() {
-        assert hasType() : this + " has no type";
-        return symbol.getSymbolType();
     }
 
     /**
@@ -156,11 +127,10 @@ public abstract class Node extends Location {
     }
 
     /**
-     * Is this a debug info node like LineNumberNode etc?
-     *
-     * @return true if this is a debug node
+     * Returns true if this node represents a comparison operator
+     * @return true if comparison
      */
-    public boolean isDebug() {
+    public boolean isComparison() {
         return false;
     }
 
@@ -179,7 +149,7 @@ public abstract class Node extends Location {
      * @param visitor Node visitor.
      * @return node the node or its replacement after visitation, null if no further visitations are required
      */
-    public abstract Node accept(NodeVisitor visitor);
+    public abstract Node accept(NodeVisitor<? extends LexicalContext> visitor);
 
     @Override
     public String toString() {
@@ -238,24 +208,68 @@ public abstract class Node extends Location {
         return start;
     }
 
-    /**
-     * Return the Symbol the compiler has assigned to this Node. The symbol
-     * is the place where it's expression value is stored after evaluation
-     *
-     * @return the symbol
-     */
-    public Symbol getSymbol() {
-        return symbol;
+    @Override
+    protected Object clone() {
+        try {
+            return super.clone();
+        } catch (final CloneNotSupportedException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    @Override
+    public final boolean equals(final Object other) {
+        return super.equals(other);
+    }
+
+    @Override
+    public final int hashCode() {
+        return super.hashCode();
     }
 
     /**
-     * Assign a symbol to this node. See {@link Node#getSymbol()} for explanation
-     * of what a symbol is
+     * Return token position from a token descriptor.
      *
-     * @param symbol the symbol
+     * @return Start position of the token in the source.
      */
-    public void setSymbol(final Symbol symbol) {
-        this.symbol = symbol;
+    public int position() {
+        return Token.descPosition(token);
+    }
+
+    /**
+     * Return token length from a token descriptor.
+     *
+     * @return Length of the token.
+     */
+    public int length() {
+        return Token.descLength(token);
+    }
+
+    /**
+     * Return token tokenType from a token descriptor.
+     *
+     * @return Type of token.
+     */
+    public TokenType tokenType() {
+        return Token.descType(token);
+    }
+
+    /**
+     * Test token tokenType.
+     *
+     * @param type a type to check this token against
+     * @return true if token types match.
+     */
+    public boolean isTokenType(final TokenType type) {
+        return Token.descType(token) == type;
+    }
+
+    /**
+     * Get the token for this location
+     * @return the token
+     */
+    public long getToken() {
+        return token;
     }
 
     /**
@@ -269,12 +283,12 @@ public abstract class Node extends Location {
     }
 
     //on change, we have to replace the entire list, that's we can't simple do ListIterator.set
-    static <T extends Node> List<T> accept(final NodeVisitor visitor, final Class<T> clazz, final List<T> list) {
+    static <T extends Node> List<T> accept(final NodeVisitor<? extends LexicalContext> visitor, final Class<T> clazz, final List<T> list) {
         boolean changed = false;
         final List<T> newList = new ArrayList<>();
 
         for (final Node node : list) {
-            final T newNode = clazz.cast(node.accept(visitor));
+            final T newNode = node == null ? null : clazz.cast(node.accept(visitor));
             if (newNode != node) {
                 changed = true;
             }

@@ -25,6 +25,7 @@
 
 package jdk.nashorn.internal.parser;
 
+import static jdk.nashorn.internal.parser.TokenType.COMMENT;
 import static jdk.nashorn.internal.parser.TokenType.EOF;
 import static jdk.nashorn.internal.parser.TokenType.EOL;
 import static jdk.nashorn.internal.parser.TokenType.IDENT;
@@ -135,14 +136,27 @@ public abstract class AbstractParser {
     }
 
     /**
-     * Seek next token that is not an EOL.
+     * Seek next token that is not an EOL or comment.
      *
      * @return tokenType of next token.
      */
     protected final TokenType next() {
         do {
             nextOrEOL();
-        } while (type == EOL);
+        } while (type == EOL || type == COMMENT);
+
+        return type;
+    }
+
+    /**
+     * Seek next token or EOL (skipping comments.)
+     *
+     * @return tokenType of next token.
+     */
+    protected final TokenType nextOrEOL() {
+        do {
+            nextToken();
+        } while (type == COMMENT);
 
         return type;
     }
@@ -152,7 +166,7 @@ public abstract class AbstractParser {
      *
      * @return tokenType of next token.
      */
-    protected final TokenType nextOrEOL() {
+    private final TokenType nextToken() {
         // Capture last token tokenType.
         last = type;
         if (type != EOF) {
@@ -249,6 +263,7 @@ public abstract class AbstractParser {
      *
      * @param errorType  The error type of the warning
      * @param message    Warning message.
+     * @param errorToken error token
      */
     protected final void warning(final JSErrorType errorType, final String message, final long errorToken) {
         errors.warning(error(errorType, message, errorToken));
@@ -363,7 +378,7 @@ public abstract class AbstractParser {
             next();
 
             // Create IDENT node.
-            return new IdentNode(source, identToken, finish, ident);
+            return new IdentNode(identToken, finish, ident);
         }
 
         // Get IDENT.
@@ -372,7 +387,7 @@ public abstract class AbstractParser {
             return null;
         }
         // Create IDENT node.
-        return new IdentNode(source, identToken, finish, ident);
+        return new IdentNode(identToken, finish, ident);
     }
 
     /**
@@ -407,7 +422,7 @@ public abstract class AbstractParser {
             final String ident = (String)getValue(identToken);
             next();
             // Create IDENT node.
-            return new IdentNode(source, identToken, finish, ident);
+            return new IdentNode(identToken, finish, ident);
         } else {
             expect(IDENT);
             return null;
@@ -432,11 +447,11 @@ public abstract class AbstractParser {
         LiteralNode<?> node = null;
 
         if (value == null) {
-            node = LiteralNode.newInstance(source, literalToken, finish);
+            node = LiteralNode.newInstance(literalToken, finish);
         } else if (value instanceof Number) {
-            node = LiteralNode.newInstance(source, literalToken, finish, (Number)value);
+            node = LiteralNode.newInstance(literalToken, finish, (Number)value);
         } else if (value instanceof String) {
-            node = LiteralNode.newInstance(source, literalToken, finish, (String)value);
+            node = LiteralNode.newInstance(literalToken, finish, (String)value);
         } else if (value instanceof LexerToken) {
             if (value instanceof RegexToken) {
                 final RegexToken regex = (RegexToken)value;
@@ -446,7 +461,7 @@ public abstract class AbstractParser {
                     throw error(e.getMessage());
                 }
             }
-            node = LiteralNode.newInstance(source, literalToken, finish, (LexerToken)value);
+            node = LiteralNode.newInstance(literalToken, finish, (LexerToken)value);
         } else {
             assert false : "unknown type for LiteralNode: " + value.getClass();
         }

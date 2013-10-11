@@ -25,47 +25,22 @@
 
 package jdk.nashorn.internal.ir;
 
-import java.util.Arrays;
 import java.util.List;
-
 import jdk.nashorn.internal.codegen.Label;
-import jdk.nashorn.internal.ir.annotations.Immutable;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * This class represents a node from which control flow can execute
  * a {@code break} statement
  */
-@Immutable
-public abstract class BreakableNode extends LexicalContextNode {
-
-    /** break label. */
-    protected final Label breakLabel;
-
+public interface BreakableNode extends LexicalContextNode {
     /**
-     * Constructor
+     * Ensure that any labels in this breakable node are unique so
+     * that new jumps won't go to old parts of the tree. Used for
+     * example for cloning finally blocks
      *
-     * @param source     source code
-     * @param token      token
-     * @param finish     finish
-     * @param breakLabel break label
+     * @param lc the lexical context
+     * @return node after labels have been made unique
      */
-    protected BreakableNode(final Source source, final long token, final int finish, final Label breakLabel) {
-        super(source, token, finish);
-        this.breakLabel = breakLabel;
-    }
-
-    /**
-     * Copy constructor
-     *
-     * @param breakableNode source node
-     */
-    protected BreakableNode(final BreakableNode breakableNode) {
-        super(breakableNode);
-        this.breakLabel = new Label(breakableNode.getBreakLabel());
-    }
-
-    @Override
     public abstract Node ensureUniqueLabels(final LexicalContext lc);
 
     /**
@@ -73,26 +48,19 @@ public abstract class BreakableNode extends LexicalContextNode {
      * e.g. everything but Blocks, basically
      * @return true if breakable without label
      */
-    protected boolean isBreakableWithoutLabel() {
-        return true;
-    }
+    public boolean isBreakableWithoutLabel();
 
     /**
      * Return the break label, i.e. the location to go to on break.
      * @return the break label
      */
-    public Label getBreakLabel() {
-        return breakLabel;
-    }
+    public Label getBreakLabel();
 
     /**
      * Return the labels associated with this node. Breakable nodes that
-     * aren't LoopNodes only have a break label -> the location immediately
+     * aren't LoopNodes only have a break label - the location immediately
      * afterwards the node in code
      * @return list of labels representing locations around this node
      */
-    public List<Label> getLabels() {
-        return Arrays.asList(breakLabel);
-    }
-
+    public List<Label> getLabels();
 }

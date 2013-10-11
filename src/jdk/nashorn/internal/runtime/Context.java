@@ -36,7 +36,8 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
-import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+import java.util.concurrent.atomic.AtomicLong;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.AccessControlContext;
@@ -46,13 +47,17 @@ import java.security.CodeSource;
 import java.security.Permissions;
 import java.security.PrivilegedAction;
 import java.security.ProtectionDomain;
+import java.util.Map;
+
 import jdk.internal.org.objectweb.asm.ClassReader;
 import jdk.internal.org.objectweb.asm.util.CheckClassAdapter;
+import jdk.nashorn.api.scripting.ScriptObjectMirror;
 import jdk.nashorn.internal.codegen.Compiler;
 import jdk.nashorn.internal.codegen.ObjectClassGenerator;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.debug.ASTWriter;
 import jdk.nashorn.internal.ir.debug.PrintVisitor;
+import jdk.nashorn.internal.objects.Global;
 import jdk.nashorn.internal.parser.Parser;
 import jdk.nashorn.internal.runtime.options.Options;
 
@@ -60,6 +65,36 @@ import jdk.nashorn.internal.runtime.options.Options;
  * This class manages the global state of execution. Context is immutable.
  */
 public final class Context {
+    // nashorn specific security runtime access permission names
+    /**
+     * Permission needed to pass arbitrary nashorn command line options when creating Context.
+     */
+    public static final String NASHORN_SET_CONFIG      = "nashorn.setConfig";
+
+    /**
+     * Permission needed to create Nashorn Context instance.
+     */
+    public static final String NASHORN_CREATE_CONTEXT  = "nashorn.createContext";
+
+    /**
+     * Permission needed to create Nashorn Global instance.
+     */
+    public static final String NASHORN_CREATE_GLOBAL   = "nashorn.createGlobal";
+
+    /**
+     * Permission to get current Nashorn Context from thread local storage.
+     */
+    public static final String NASHORN_GET_CONTEXT     = "nashorn.getContext";
+
+    /**
+     * Permission to use Java reflection/jsr292 from script code.
+     */
+    public static final String NASHORN_JAVA_REFLECTION = "nashorn.JavaReflection";
+
+    /* Force DebuggerSupport to be loaded. */
+    static {
+        DebuggerSupport.FORCELOAD = true;
+    }
 
     /**
      * ContextCodeInstaller that has the privilege of installing classes in the Context.
@@ -94,18 +129,17 @@ public final class Context {
         public void verify(final byte[] code) {
             context.verify(code);
         }
+
+        @Override
+        public long getUniqueScriptId() {
+            return context.getUniqueScriptId();
+        }
     }
 
     /** Is Context global debug mode enabled ? */
     public static final boolean DEBUG = Options.getBooleanProperty("nashorn.debug");
 
-    private static final ThreadLocal<ScriptObject> currentGlobal =
-        new ThreadLocal<ScriptObject>() {
-            @Override
-            protected ScriptObject initialValue() {
-                 return null;
-            }
-        };
+    private static final ThreadLocal<ScriptObject> currentGlobal = new ThreadLocal<>();
 
     /**
      * Get the current global scope
@@ -122,13 +156,8 @@ public final class Context {
      * @param global the global scope
      */
     public static void setGlobal(final ScriptObject global) {
-        final SecurityManager sm = System.getSecurityManager();
-        if (sm != null) {
-            sm.checkPermission(new RuntimePermission("nashorn.setGlobal"));
-        }
-
-        if (global != null && !(global instanceof GlobalObject)) {
-            throw new IllegalArgumentException("global does not implement GlobalObject!");
+        if (global != null && !(global instanceof Global)) {
+            throw new IllegalArgumentException("global is not an instance of Global!");
         }
 
         setGlobalTrusted(global);
@@ -141,7 +170,7 @@ public final class Context {
     public static Context getContext() {
         final SecurityManager sm = System.getSecurityManager();
         if (sm != null) {
-            sm.checkPermission(new RuntimePermission("nashorn.getContext"));
+            sm.checkPermission(new RuntimePermission(NASHORN_GET_CONTEXT));
         }
         return getContextTrusted();
     }
@@ -187,7 +216,7 @@ public final class Context {
     private final ScriptEnvironment env;
 
     /** is this context in strict mode? Cached from env. as this is used heavily. */
-    public final boolean _strict;
+    final boolean _strict;
 
     /** class loader to resolve classes from script. */
     private final ClassLoader  appLoader;
@@ -201,19 +230,37 @@ public final class Context {
     /** Current error manager. */
     private final ErrorManager errors;
 
-    /** Empty map used for seed map for JO objects */
-    final PropertyMap emptyMap = PropertyMap.newEmptyMap(this);
+    /** Unique id for script. Used only when --loader-per-compile=false */
+    private final AtomicLong uniqueScriptId;
 
     private static final ClassLoader myLoader = Context.class.getClassLoader();
     private static final StructureLoader sharedLoader;
+
+    /*package-private*/ ClassLoader getSharedLoader() {
+        return sharedLoader;
+    }
+
+    private static AccessControlContext createNoPermAccCtxt() {
+        return new AccessControlContext(new ProtectionDomain[] { new ProtectionDomain(null, new Permissions()) });
+    }
+
+    private static AccessControlContext createPermAccCtxt(final String permName) {
+        final Permissions perms = new Permissions();
+        perms.add(new RuntimePermission(permName));
+        return new AccessControlContext(new ProtectionDomain[] { new ProtectionDomain(null, perms) });
+    }
+
+    private static final AccessControlContext NO_PERMISSIONS_ACC_CTXT = createNoPermAccCtxt();
+    private static final AccessControlContext CREATE_LOADER_ACC_CTXT  = createPermAccCtxt("createClassLoader");
+    private static final AccessControlContext CREATE_GLOBAL_ACC_CTXT  = createPermAccCtxt(NASHORN_CREATE_GLOBAL);
 
     static {
         sharedLoader = AccessController.doPrivileged(new PrivilegedAction<StructureLoader>() {
             @Override
             public StructureLoader run() {
-                return new StructureLoader(myLoader, null);
+                return new StructureLoader(myLoader);
             }
-        });
+        }, CREATE_LOADER_ACC_CTXT);
     }
 
     /**
@@ -254,20 +301,19 @@ public final class Context {
     public Context(final Options options, final ErrorManager errors, final PrintWriter out, final PrintWriter err, final ClassLoader appLoader) {
         final SecurityManager sm = System.getSecurityManager();
         if (sm != null) {
-            sm.checkPermission(new RuntimePermission("nashorn.createContext"));
+            sm.checkPermission(new RuntimePermission(NASHORN_CREATE_CONTEXT));
         }
 
         this.env       = new ScriptEnvironment(options, out, err);
         this._strict   = env._strict;
         this.appLoader = appLoader;
-        this.scriptLoader = (ScriptLoader)AccessController.doPrivileged(
-             new PrivilegedAction<ClassLoader>() {
-                @Override
-                public ClassLoader run() {
-                    final StructureLoader structureLoader = new StructureLoader(sharedLoader, Context.this);
-                    return new ScriptLoader(structureLoader, Context.this);
-                }
-             });
+        if (env._loader_per_compile) {
+            this.scriptLoader = null;
+            this.uniqueScriptId = null;
+        } else {
+            this.scriptLoader = createNewLoader();
+            this.uniqueScriptId = new AtomicLong();
+        }
         this.errors    = errors;
 
         // if user passed -classpath option, make a class loader with that and set it as
@@ -414,7 +460,7 @@ public final class Context {
         return ScriptRuntime.apply(func, evalThis);
     }
 
-    private Source loadInternal(final String srcStr, final String prefix, final String resourcePath) {
+    private static Source loadInternal(final String srcStr, final String prefix, final String resourcePath) {
         if (srcStr.startsWith(prefix)) {
             final String resource = resourcePath + srcStr.substring(prefix.length());
             // NOTE: even sandbox scripts should be able to load scripts in nashorn: scheme
@@ -484,6 +530,13 @@ public final class Context {
                 final String name   = JSType.toString(sobj.get("name"));
                 source = new Source(name, script);
             }
+        } else if (src instanceof Map) {
+            final Map<?,?> map = (Map<?,?>)src;
+            if (map.containsKey("script") && map.containsKey("name")) {
+                final String script = JSType.toString(map.get("script"));
+                final String name   = JSType.toString(map.get("name"));
+                source = new Source(name, script);
+            }
         }
 
         if (source != null) {
@@ -491,6 +544,48 @@ public final class Context {
         }
 
         throw typeError("cant.load.script", ScriptRuntime.safeToString(from));
+    }
+
+    /**
+     * Implementation of {@code loadWithNewGlobal} Nashorn extension. Load a script file from a source
+     * expression, after creating a new global scope.
+     *
+     * @param from source expression for script
+     * @param args (optional) arguments to be passed to the loaded script
+     *
+     * @return return value for load call (undefined)
+     *
+     * @throws IOException if source cannot be found or loaded
+     */
+    public Object loadWithNewGlobal(final Object from, final Object...args) throws IOException {
+        final ScriptObject oldGlobal = getGlobalTrusted();
+        final ScriptObject newGlobal = AccessController.doPrivileged(new PrivilegedAction<ScriptObject>() {
+           @Override
+           public ScriptObject run() {
+               try {
+                   return newGlobal();
+               } catch (final RuntimeException e) {
+                   if (Context.DEBUG) {
+                       e.printStackTrace();
+                   }
+                   throw e;
+               }
+           }
+        }, CREATE_GLOBAL_ACC_CTXT);
+        // initialize newly created Global instance
+        initGlobal(newGlobal);
+        setGlobalTrusted(newGlobal);
+
+        final Object[] wrapped = args == null? ScriptRuntime.EMPTY_ARRAY :  ScriptObjectMirror.wrapArray(args, oldGlobal);
+        newGlobal.put("arguments", ((GlobalObject)newGlobal).wrapAsObject(wrapped), env._strict);
+
+        try {
+            // wrap objects from newGlobal's world as mirrors - but if result
+            // is from oldGlobal's world, unwrap it!
+            return ScriptObjectMirror.unwrap(ScriptObjectMirror.wrap(load(newGlobal, from), newGlobal), oldGlobal);
+        } finally {
+            setGlobalTrusted(oldGlobal);
+        }
     }
 
     /**
@@ -508,21 +603,19 @@ public final class Context {
      * @throws ClassNotFoundException if structure class cannot be resolved
      */
     public static Class<?> forStructureClass(final String fullName) throws ClassNotFoundException {
+        if (System.getSecurityManager() != null && !StructureLoader.isStructureClass(fullName)) {
+            throw new ClassNotFoundException(fullName);
+        }
         return Class.forName(fullName, true, sharedLoader);
     }
 
     /**
-     * Lookup a Java class. This is used for JSR-223 stuff linking in from
-     * {@link jdk.nashorn.internal.objects.NativeJava} and {@link jdk.nashorn.internal.runtime.NativeJavaPackage}
+     * Checks that the given package can be accessed from no permissions context.
      *
-     * @param fullName full name of class to load
-     *
-     * @return the {@code Class<?>} for the name
-     *
-     * @throws ClassNotFoundException if class cannot be resolved
+     * @param fullName fully qualified package name
+     * @throw SecurityException if not accessible
      */
-    public Class<?> findClass(final String fullName) throws ClassNotFoundException {
-        // check package access as soon as possible!
+    public static void checkPackageAccess(final String fullName) {
         final int index = fullName.lastIndexOf('.');
         if (index != -1) {
             final SecurityManager sm = System.getSecurityManager();
@@ -533,9 +626,49 @@ public final class Context {
                         sm.checkPackageAccess(fullName.substring(0, index));
                         return null;
                     }
-                }, createNoPermissionsContext());
+                }, NO_PERMISSIONS_ACC_CTXT);
             }
         }
+    }
+
+    /**
+     * Checks that the given package can be accessed from no permissions context.
+     *
+     * @param fullName fully qualified package name
+     * @return true if package is accessible, false otherwise
+     */
+    public static boolean isAccessiblePackage(final String fullName) {
+        try {
+            checkPackageAccess(fullName);
+            return true;
+        } catch (final SecurityException se) {
+            return false;
+        }
+    }
+
+    /**
+     * Checks that the given Class is public and it can be accessed from no permissions context.
+     *
+     * @param clazz Class object to check
+     * @return true if Class is accessible, false otherwise
+     */
+    public static boolean isAccessibleClass(final Class<?> clazz) {
+        return Modifier.isPublic(clazz.getModifiers()) && Context.isAccessiblePackage(clazz.getName());
+    }
+
+    /**
+     * Lookup a Java class. This is used for JSR-223 stuff linking in from
+     * {@code jdk.nashorn.internal.objects.NativeJava} and {@code jdk.nashorn.internal.runtime.NativeJavaPackage}
+     *
+     * @param fullName full name of class to load
+     *
+     * @return the {@code Class<?>} for the name
+     *
+     * @throws ClassNotFoundException if class cannot be resolved
+     */
+    public Class<?> findClass(final String fullName) throws ClassNotFoundException {
+        // check package access as soon as possible!
+        checkPackageAccess(fullName);
 
         // try the script -classpath loader, if that is set
         if (classPathLoader != null) {
@@ -578,7 +711,7 @@ public final class Context {
             // No verification when security manager is around as verifier
             // may load further classes - which should be avoided.
             if (System.getSecurityManager() == null) {
-                CheckClassAdapter.verify(new ClassReader(bytecode), scriptLoader, false, new PrintWriter(System.err, true));
+                CheckClassAdapter.verify(new ClassReader(bytecode), sharedLoader, false, new PrintWriter(System.err, true));
             }
         }
     }
@@ -597,12 +730,7 @@ public final class Context {
      * @return the global script object
      */
     public ScriptObject newGlobal() {
-        final SecurityManager sm = System.getSecurityManager();
-        if (sm != null) {
-            sm.checkPermission(new RuntimePermission("nashorn.newGlobal"));
-        }
-
-        return newGlobalTrusted();
+        return new Global(this);
     }
 
     /**
@@ -668,16 +796,11 @@ public final class Context {
     static Context fromClass(final Class<?> clazz) {
         final ClassLoader loader = clazz.getClassLoader();
 
-        Context context = null;
-        if (loader instanceof NashornLoader) {
-            context = ((NashornLoader)loader).getContext();
+        if (loader instanceof ScriptLoader) {
+            return ((ScriptLoader)loader).getContext();
         }
 
-        return (context != null) ? context : Context.getContextTrusted();
-    }
-
-    private static AccessControlContext createNoPermissionsContext() {
-        return new AccessControlContext(new ProtectionDomain[] { new ProtectionDomain(null, new Permissions()) });
+        return Context.getContextTrusted();
     }
 
     private Object evaluateSource(final Source source, final ScriptObject scope, final ScriptObject thiz) {
@@ -762,10 +885,10 @@ public final class Context {
         final CodeSource   cs     = url == null ? null : new CodeSource(url, (CodeSigner[])null);
         final CodeInstaller<ScriptEnvironment> installer = new ContextCodeInstaller(this, loader, cs);
 
-        final Compiler compiler = new Compiler(installer, functionNode, strict);
+        final Compiler compiler = new Compiler(installer, strict);
 
-        compiler.compile();
-        script = compiler.install();
+        final FunctionNode newFunctionNode = compiler.compile(functionNode);
+        script = compiler.install(newFunctionNode);
 
         if (global != null) {
             global.cacheClass(source, script);
@@ -779,25 +902,12 @@ public final class Context {
              new PrivilegedAction<ScriptLoader>() {
                 @Override
                 public ScriptLoader run() {
-                    // Generated code won't refer to any class generated by context
-                    // script loader and so parent loader can be the structure
-                    // loader -- which is parent of the context script loader.
-                    return new ScriptLoader((StructureLoader)scriptLoader.getParent(), Context.this);
+                    return new ScriptLoader(appLoader, Context.this);
                 }
-             });
+             }, CREATE_LOADER_ACC_CTXT);
     }
 
-    private ScriptObject newGlobalTrusted() {
-        try {
-            final Class<?> clazz = Class.forName("jdk.nashorn.internal.objects.Global", true, scriptLoader);
-            final Constructor<?> cstr = clazz.getConstructor(Context.class);
-            return (ScriptObject) cstr.newInstance(this);
-        } catch (final Exception e) {
-            printStackTrace(e);
-            if (e instanceof RuntimeException) {
-                throw (RuntimeException)e;
-            }
-            throw new RuntimeException(e);
-        }
+    private long getUniqueScriptId() {
+        return uniqueScriptId.getAndIncrement();
     }
 }

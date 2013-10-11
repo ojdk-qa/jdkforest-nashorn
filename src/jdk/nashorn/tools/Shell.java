@@ -34,8 +34,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
 import java.util.List;
 import java.util.Locale;
 import java.util.ResourceBundle;
@@ -47,6 +45,7 @@ import jdk.nashorn.internal.ir.debug.PrintVisitor;
 import jdk.nashorn.internal.parser.Parser;
 import jdk.nashorn.internal.runtime.Context;
 import jdk.nashorn.internal.runtime.ErrorManager;
+import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.Property;
 import jdk.nashorn.internal.runtime.ScriptEnvironment;
 import jdk.nashorn.internal.runtime.ScriptFunction;
@@ -67,18 +66,7 @@ public class Shell {
     /**
      * Shell message bundle.
      */
-    private static ResourceBundle bundle;
-
-    static {
-        // Without do privileged, under security manager messages can not be
-        // loaded.
-        bundle = AccessController.doPrivileged(new PrivilegedAction<ResourceBundle>() {
-            @Override
-            public ResourceBundle run() {
-                return ResourceBundle.getBundle(MESSAGE_RESOURCE, Locale.getDefault());
-            }
-        });
-    }
+    private static final ResourceBundle bundle = ResourceBundle.getBundle(MESSAGE_RESOURCE, Locale.getDefault());
 
     /**
      * Exit code for command line tool - successful
@@ -173,9 +161,9 @@ public class Shell {
 
         if (env._fx) {
             return runFXScripts(context, global, files);
-        } else {
-            return runScripts(context, global, files);
         }
+
+        return runScripts(context, global, files);
     }
 
     /**
@@ -270,7 +258,7 @@ public class Shell {
                 }
 
                 //null - pass no code installer - this is compile only
-                new Compiler(env, functionNode).compile();
+                new Compiler(env).compile(functionNode);
             }
         } finally {
             env.getOut().flush();
@@ -304,6 +292,14 @@ public class Shell {
 
             // For each file on the command line.
             for (final String fileName : files) {
+                if ("-".equals(fileName)) {
+                    final int res = readEvalPrint(context, global);
+                    if (res != SUCCESS) {
+                        return res;
+                    }
+                    continue;
+                }
+
                 final File file = new File(fileName);
                 final ScriptFunction script = context.compileScript(new Source(fileName, file.toURI().toURL()), global);
                 if (script == null || errors.getNumberOfErrors() != 0) {
@@ -343,7 +339,7 @@ public class Shell {
      * @return error code
      * @throws IOException when any script file read results in I/O error
      */
-    private int runFXScripts(final Context context, final ScriptObject global, final List<String> files) throws IOException {
+    private static int runFXScripts(final Context context, final ScriptObject global, final List<String> files) throws IOException {
         final ScriptObject oldGlobal = Context.getGlobal();
         final boolean globalChanged = (oldGlobal != global);
         try {
@@ -434,6 +430,10 @@ public class Shell {
                     break;
                 }
 
+                if (source.isEmpty()) {
+                    continue;
+                }
+
                 Object res;
                 try {
                     res = context.eval(global, source, global, "<shell>", env._strict);
@@ -445,8 +445,8 @@ public class Shell {
                     continue;
                 }
 
-                if (res != null && res != ScriptRuntime.UNDEFINED) {
-                    err.println(ScriptRuntime.safeToString(res));
+                if (res != ScriptRuntime.UNDEFINED) {
+                    err.println(JSType.toString(res));
                 }
             }
         } finally {

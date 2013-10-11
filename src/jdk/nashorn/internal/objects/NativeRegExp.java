@@ -43,6 +43,7 @@ import jdk.nashorn.internal.objects.annotations.Where;
 import jdk.nashorn.internal.runtime.BitVector;
 import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.ParserException;
+import jdk.nashorn.internal.runtime.PropertyMap;
 import jdk.nashorn.internal.runtime.regexp.RegExp;
 import jdk.nashorn.internal.runtime.regexp.RegExpFactory;
 import jdk.nashorn.internal.runtime.regexp.RegExpResult;
@@ -64,9 +65,22 @@ public final class NativeRegExp extends ScriptObject {
     private RegExp regexp;
 
     // Reference to global object needed to support static RegExp properties
-    private Global globalObject;
+    private final Global globalObject;
 
-    NativeRegExp(final String input, final String flagString) {
+    // initialized by nasgen
+    private static PropertyMap $nasgenmap$;
+
+    static PropertyMap getInitialMap() {
+        return $nasgenmap$;
+    }
+
+    private NativeRegExp(final Global global) {
+        super(global.getRegExpPrototype(), global.getRegExpMap());
+        this.globalObject = global;
+    }
+
+    NativeRegExp(final String input, final String flagString, final Global global) {
+        this(global);
         try {
             this.regexp = RegExpFactory.create(input, flagString);
         } catch (final ParserException e) {
@@ -76,17 +90,24 @@ public final class NativeRegExp extends ScriptObject {
         }
 
         this.setLastIndex(0);
-        init();
+    }
+
+    NativeRegExp(final String input, final String flagString) {
+        this(input, flagString, Global.instance());
+    }
+
+    NativeRegExp(final String string, final Global global) {
+        this(string, "", global);
     }
 
     NativeRegExp(final String string) {
-        this(string, "");
+        this(string, Global.instance());
     }
 
     NativeRegExp(final NativeRegExp regExp) {
+        this(Global.instance());
         this.lastIndex  = regExp.getLastIndexObject();
         this.regexp      = regExp.getRegExp();
-        init();
     }
 
     @Override
@@ -170,21 +191,19 @@ public final class NativeRegExp extends ScriptObject {
     public static NativeRegExp newRegExp(final Object regexp, final Object flags) {
         String  patternString = "";
         String  flagString    = "";
-        boolean flagsDefined  = false;
-
-        if (flags != UNDEFINED) {
-            flagsDefined = true;
-            flagString = JSType.toString(flags);
-        }
 
         if (regexp != UNDEFINED) {
             if (regexp instanceof NativeRegExp) {
-                if (!flagsDefined) {
-                    return (NativeRegExp)regexp; // 15.10.3.1 - undefined flags and regexp as
+                if (flags != UNDEFINED) {
+                    throw typeError("regex.cant.supply.flags");
                 }
-                throw typeError("regex.cant.supply.flags");
+                return (NativeRegExp)regexp; // 15.10.3.1 - undefined flags and regexp as
             }
             patternString = JSType.toString(regexp);
+        }
+
+        if (flags != UNDEFINED) {
+            flagString = JSType.toString(flags);
         }
 
         return new NativeRegExp(patternString, flagString);
@@ -610,7 +629,7 @@ public final class NativeRegExp extends ScriptObject {
             return null;
         }
 
-        return new NativeRegExpExecResult(match);
+        return new NativeRegExpExecResult(match, globalObject);
     }
 
     /**
@@ -641,26 +660,19 @@ public final class NativeRegExp extends ScriptObject {
             return string;
         }
 
-        /*
-         * $$ -> $
-         * $& -> the matched substring
-         * $` -> the portion of string that preceeds matched substring
-         * $' -> the portion of string that follows the matched substring
-         * $n -> the nth capture, where n is [1-9] and $n is NOT followed by a decimal digit
-         * $nn -> the nnth capture, where nn is a two digit decimal number [01-99].
-         */
-        String replace = replacement;
-
         if (!regexp.isGlobal()) {
             if (!matcher.search(0)) {
                 return string;
             }
 
             final StringBuilder sb = new StringBuilder();
+            sb.append(string, 0, matcher.start());
+
             if (function != null) {
-                replace = callReplaceValue(function, matcher, string);
+                sb.append(callReplaceValue(function, matcher, string));
+            } else {
+                appendReplacement(matcher, string, replacement, sb);
             }
-            appendReplacement(matcher, string, replace, sb, 0);
             sb.append(string, matcher.end(), string.length());
             return sb.toString();
         }
@@ -676,14 +688,20 @@ public final class NativeRegExp extends ScriptObject {
         final StringBuilder sb = new StringBuilder();
 
         do {
+            sb.append(string, thisIndex, matcher.start());
             if (function != null) {
-                replace = callReplaceValue(function, matcher, string);
+                sb.append(callReplaceValue(function, matcher, string));
+            } else {
+                appendReplacement(matcher, string, replacement, sb);
             }
 
-            appendReplacement(matcher, string, replace, sb, thisIndex);
+            thisIndex = matcher.end();
+            if (thisIndex == string.length() && matcher.start() == matcher.end()) {
+                // Avoid getting empty match at end of string twice
+                break;
+            }
 
             // ECMA 15.5.4.10 String.prototype.match(regexp)
-            thisIndex = matcher.end();
             if (thisIndex == previousLastIndex) {
                 setLastIndex(thisIndex + 1);
                 previousLastIndex = thisIndex + 1;
@@ -697,10 +715,19 @@ public final class NativeRegExp extends ScriptObject {
         return sb.toString();
     }
 
-    private void appendReplacement(final RegExpMatcher matcher, final String text, final String replacement, final StringBuilder sb, final int lastAppendPosition) {
-        // Process substitution string to replace group references with groups
+    private void appendReplacement(final RegExpMatcher matcher, final String text, final String replacement, final StringBuilder sb) {
+        /*
+         * Process substitution patterns:
+         *
+         * $$ -> $
+         * $& -> the matched substring
+         * $` -> the portion of string that preceeds matched substring
+         * $' -> the portion of string that follows the matched substring
+         * $n -> the nth capture, where n is [1-9] and $n is NOT followed by a decimal digit
+         * $nn -> the nnth capture, where nn is a two digit decimal number [01-99].
+         */
+
         int cursor = 0;
-        final StringBuilder result = new StringBuilder();
         Object[] groups = null;
 
         while (cursor < replacement.length()) {
@@ -732,37 +759,33 @@ public final class NativeRegExp extends ScriptObject {
                         }
                         // Append group if matched.
                         if (groups[refNum] != UNDEFINED) {
-                            result.append((String) groups[refNum]);
+                            sb.append((String) groups[refNum]);
                         }
                     } else { // $0. ignore.
                         assert refNum == 0;
-                        result.append("$0");
+                        sb.append("$0");
                     }
                 } else if (nextChar == '$') {
-                    result.append('$');
+                    sb.append('$');
                     cursor++;
                 } else if (nextChar == '&') {
-                    result.append(matcher.group());
+                    sb.append(matcher.group());
                     cursor++;
                 } else if (nextChar == '`') {
-                    result.append(text.substring(0, matcher.start()));
+                    sb.append(text, 0, matcher.start());
                     cursor++;
                 } else if (nextChar == '\'') {
-                    result.append(text.substring(matcher.end()));
+                    sb.append(text, matcher.end(), text.length());
                     cursor++;
                 } else {
                     // unknown substitution or $n with n>m. skip.
-                    result.append('$');
+                    sb.append('$');
                 }
             } else {
-                result.append(nextChar);
+                sb.append(nextChar);
                 cursor++;
             }
         }
-        // Append the intervening text
-        sb.append(text, lastAppendPosition, matcher.start());
-        // Append the match substitution
-        sb.append(result);
     }
 
     private String callReplaceValue(final ScriptFunction function, final RegExpMatcher matcher, final String string) {
@@ -794,15 +817,15 @@ public final class NativeRegExp extends ScriptObject {
 
         RegExpResult match;
         final int inputLength = string.length();
-        int lastLength = -1;
-        int lastIndex = 0;
-        int lastLastIndex = 0;
+        int splitLastLength = -1;
+        int splitLastIndex = 0;
+        int splitLastLastIndex = 0;
 
-        while ((match = execSplit(string, lastIndex)) != null) {
-            lastIndex = match.getIndex() + match.length();
+        while ((match = execSplit(string, splitLastIndex)) != null) {
+            splitLastIndex = match.getIndex() + match.length();
 
-            if (lastIndex > lastLastIndex) {
-                matches.add(string.substring(lastLastIndex, match.getIndex()));
+            if (splitLastIndex > splitLastLastIndex) {
+                matches.add(string.substring(splitLastLastIndex, match.getIndex()));
                 final Object[] groups = match.getGroups();
                 if (groups.length > 1 && match.getIndex() < inputLength) {
                     for (int index = 1; index < groups.length && matches.size() < limit; index++) {
@@ -810,7 +833,7 @@ public final class NativeRegExp extends ScriptObject {
                     }
                 }
 
-                lastLength = match.length();
+                splitLastLength = match.length();
 
                 if (matches.size() >= limit) {
                     break;
@@ -818,10 +841,10 @@ public final class NativeRegExp extends ScriptObject {
             }
 
             // bump the index to avoid infinite loop
-            if (lastIndex == lastLastIndex) {
-                lastIndex++;
+            if (splitLastIndex == splitLastLastIndex) {
+                splitLastIndex++;
             } else {
-                lastLastIndex = lastIndex;
+                splitLastLastIndex = splitLastIndex;
             }
         }
 
@@ -829,12 +852,12 @@ public final class NativeRegExp extends ScriptObject {
             // check special case if we need to append an empty string at the
             // end of the match
             // if the lastIndex was the entire string
-            if (lastLastIndex == string.length()) {
-                if (lastLength > 0 || execSplit("", 0) == null) {
+            if (splitLastLastIndex == string.length()) {
+                if (splitLastLength > 0 || execSplit("", 0) == null) {
                     matches.add("");
                 }
             } else {
-                matches.add(string.substring(lastLastIndex, inputLength));
+                matches.add(string.substring(splitLastLastIndex, inputLength));
             }
         }
 
@@ -863,7 +886,7 @@ public final class NativeRegExp extends ScriptObject {
      * @return last index property as int
      */
     public int getLastIndex() {
-        return JSType.toInt32(lastIndex);
+        return JSType.toInteger(lastIndex);
     }
 
     /**
@@ -882,12 +905,6 @@ public final class NativeRegExp extends ScriptObject {
         this.lastIndex = JSType.toObject(lastIndex);
     }
 
-    private void init() {
-        // Keep reference to global object to support "static" properties of RegExp
-        this.globalObject = Global.instance();
-        this.setProto(globalObject.getRegExpPrototype());
-    }
-
     private static NativeRegExp checkRegExp(final Object self) {
         Global.checkObjectCoercible(self);
         if (self instanceof NativeRegExp) {
@@ -897,10 +914,6 @@ public final class NativeRegExp extends ScriptObject {
         } else {
             throw typeError("not.a.regexp", ScriptRuntime.safeToString(self));
         }
-    }
-
-    private void setGlobal(final boolean global) {
-        regexp.setGlobal(global);
     }
 
     boolean getGlobal() {

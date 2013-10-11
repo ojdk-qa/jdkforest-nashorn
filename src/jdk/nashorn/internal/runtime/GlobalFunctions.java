@@ -30,12 +30,10 @@ import static jdk.nashorn.internal.lookup.Lookup.MH;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.util.Locale;
 
 /**
  * Utilities used by Global class.
- *
- * These are actual implementation methods for functions exposed by global
- * scope. The code lives here to share the code across the contexts.
  */
 public final class GlobalFunctions {
 
@@ -92,6 +90,7 @@ public final class GlobalFunctions {
     public static double parseInt(final Object self, final Object string, final Object rad) {
         final String str    = JSType.trimLeft(JSType.toString(string));
         final int    length = str.length();
+        int          radix  = JSType.toInt32(rad);
 
         // empty string is not valid
         if (length == 0) {
@@ -115,7 +114,6 @@ public final class GlobalFunctions {
         }
 
         boolean stripPrefix = true;
-        int     radix = JSType.toInt32(rad);
 
         if (radix != 0) {
             if (radix < 2 || radix > 36) {
@@ -213,7 +211,7 @@ loop:
             switch (ch) {
             case '.':
                 // dot allowed only once
-                if (dotSeen) {
+                if (exponentOffset != -1 || dotSeen) {
                     break loop;
                 }
                 dotSeen = true;
@@ -372,11 +370,16 @@ loop:
                 sb.append(ch);
             } else if (ch < 256) {
                 sb.append('%');
-                final byte b = (byte)ch;
-                sb.append(Integer.toHexString(b & 0xFF).toUpperCase());
+                if (ch < 16) {
+                    sb.append('0');
+                }
+                sb.append(Integer.toHexString(ch).toUpperCase(Locale.ENGLISH));
             } else {
                 sb.append("%u");
-                sb.append(Integer.toHexString(ch & 0xFFFF).toUpperCase());
+                if (ch < 4096) {
+                    sb.append('0');
+                }
+                sb.append(Integer.toHexString(ch).toUpperCase(Locale.ENGLISH));
             }
         }
 

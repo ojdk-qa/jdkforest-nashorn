@@ -41,33 +41,39 @@ class SparseArrayData extends ArrayData {
     private ArrayData underlying;
 
     /** Maximum length to be stored in the array. */
-
     private final long maxDenseLength;
 
     /** Sparse elements. */
-    private TreeMap<Long, Object> sparseMap = new TreeMap<>();
+    private TreeMap<Long, Object> sparseMap;
 
-    SparseArrayData(final ArrayData underlying) {
-        super(underlying.length());
-        this.underlying = underlying;
-        this.maxDenseLength = Math.max(MAX_DENSE_LENGTH, underlying.length());
+    SparseArrayData(final ArrayData underlying, final long length) {
+        this(underlying, length, new TreeMap<Long, Object>());
     }
 
-    SparseArrayData(final ArrayData array, final long length) {
-        this(array);
-        assert array.length() <= length;
-        super.setLength(length);
+    SparseArrayData(final ArrayData underlying, final long length, final TreeMap<Long, Object> sparseMap) {
+        super(length);
+        assert underlying.length() <= length;
+        this.underlying = underlying;
+        this.maxDenseLength = Math.max(MAX_DENSE_LENGTH, underlying.length());
+        this.sparseMap = sparseMap;
+    }
+
+    @Override
+    public ArrayData copy() {
+        return new SparseArrayData(underlying.copy(), length(), new TreeMap<>(sparseMap));
     }
 
     @Override
     public Object[] asObjectArray() {
-        final Object[] objArray = new Object[Math.min((int) length(), Integer.MAX_VALUE)];
+        final int length = (int) Math.min(length(), Integer.MAX_VALUE);
+        final int underlyingLength = (int) Math.min(length, underlying.length());
+        final Object[] objArray = new Object[length];
 
-        for (int i = 0; i < underlying.length(); i++) {
+        for (int i = 0; i < underlyingLength; i++) {
             objArray[i] = underlying.getObject(i);
         }
 
-        Arrays.fill(objArray, (int) underlying.length(), objArray.length, ScriptRuntime.UNDEFINED);
+        Arrays.fill(objArray, underlyingLength, length, ScriptRuntime.UNDEFINED);
 
         for (final Map.Entry<Long, Object> entry : sparseMap.entrySet()) {
             final long key = entry.getKey();
@@ -198,6 +204,18 @@ class SparseArrayData extends ArrayData {
             sparseMap.put(indexToKey(index), value);
             setLength(Math.max(index + 1, length()));
         }
+        return this;
+    }
+
+    @Override
+    public ArrayData setEmpty(final int index) {
+        underlying.setEmpty(index);
+        return this;
+    }
+
+    @Override
+    public ArrayData setEmpty(final long lo, final long hi) {
+        underlying.setEmpty(lo, hi);
         return this;
     }
 

@@ -40,7 +40,7 @@ import java.lang.invoke.MethodHandle;
  *     private static final InvokeByName TO_JSON = new InvokeByName("toJSON", Object.class, Object.class, Object.class);
  *     ...
  *     final Object toJSONFn = TO_JSON.getGetter().invokeExact(obj);
- *     value = TO_JSON.getInvoker().invokeExact(toJSON, obj, key);
+ *     value = TO_JSON.getInvoker().invokeExact(toJSONFn, obj, key);
  * </pre>
  * In practice, you can have stronger type assumptions if it makes sense for your code, just remember that you must use
  * the same parameter types as the formal types of the arguments for {@code invokeExact} to work:
@@ -50,7 +50,7 @@ import java.lang.invoke.MethodHandle;
  *     final ScriptObject sobj = (ScriptObject)obj;
  *     final Object toJSONFn = TO_JSON.getGetter().invokeExact(sobj);
  *     if(toJSONFn instanceof ScriptFunction) {
- *         value = TO_JSON.getInvoker().invokeExact(toJSON, sobj, key);
+ *         value = TO_JSON.getInvoker().invokeExact(toJSONFn, sobj, key);
  *     }
  * </pre>
  * Note that in general you will not want to reuse a single instance of this class for implementing more than one call
@@ -58,7 +58,8 @@ import java.lang.invoke.MethodHandle;
  * you dynamically invoke a function with the same name from multiple places in your code, it is advisable to create a
  * separate instance of this class for every place.
  */
-public class InvokeByName {
+public final class InvokeByName {
+    private final String name;
     private final MethodHandle getter;
     private final MethodHandle invoker;
 
@@ -81,7 +82,8 @@ public class InvokeByName {
      * @param ptypes the parameter types of the function.
      */
     public InvokeByName(final String name, final Class<?> targetClass, final Class<?> rtype, final Class<?>... ptypes) {
-        getter  = Bootstrap.createDynamicInvoker("dyn:getMethod|getProp|getItem:" + name, Object.class, targetClass);
+        this.name = name;
+        getter  = Bootstrap.createDynamicInvoker("dyn:getMethod|getProp|getElem:" + name, Object.class, targetClass);
 
         final Class<?>[] finalPtypes;
         final int plength = ptypes.length;
@@ -94,6 +96,14 @@ public class InvokeByName {
             System.arraycopy(ptypes, 0, finalPtypes, 2, plength);
         }
         invoker = Bootstrap.createDynamicInvoker("dyn:call", rtype, finalPtypes);
+    }
+
+    /**
+     * Returns the name of the function retrieved through this invoker.
+     * @return the name of the function retrieved through this invoker.
+     */
+    public String getName() {
+        return name;
     }
 
     /**

@@ -35,12 +35,13 @@ import jdk.nashorn.internal.ir.BreakNode;
 import jdk.nashorn.internal.ir.CallNode;
 import jdk.nashorn.internal.ir.CatchNode;
 import jdk.nashorn.internal.ir.ContinueNode;
-import jdk.nashorn.internal.ir.ExecuteNode;
+import jdk.nashorn.internal.ir.ExpressionStatement;
 import jdk.nashorn.internal.ir.ForNode;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.IdentNode;
 import jdk.nashorn.internal.ir.IfNode;
 import jdk.nashorn.internal.ir.IndexNode;
+import jdk.nashorn.internal.ir.LexicalContext;
 import jdk.nashorn.internal.ir.LiteralNode;
 import jdk.nashorn.internal.ir.LiteralNode.ArrayLiteralNode;
 import jdk.nashorn.internal.ir.LiteralNode.ArrayLiteralNode.ArrayUnit;
@@ -63,28 +64,29 @@ import jdk.nashorn.internal.ir.visitor.NodeOperatorVisitor;
  * Computes the "byte code" weight of an AST segment. This is used
  * for Splitting too large class files
  */
-final class WeighNodes extends NodeOperatorVisitor {
+final class WeighNodes extends NodeOperatorVisitor<LexicalContext> {
     /*
      * Weight constants.
      */
-            static final long FUNCTION_WEIGHT  = 40;
-    private static final long ACCESS_WEIGHT    = 4;
-    private static final long ADD_WEIGHT       = 10;
-    private static final long BREAK_WEIGHT     = 1;
-    private static final long CALL_WEIGHT      = 10;
-    private static final long CATCH_WEIGHT     = 10;
-    private static final long CONTINUE_WEIGHT  = 1;
-    private static final long IF_WEIGHT        = 2;
-    private static final long LITERAL_WEIGHT   = 10;
-    private static final long LOOP_WEIGHT      = 4;
-    private static final long NEW_WEIGHT       = 6;
-    private static final long FUNC_EXPR_WEIGHT = 20;
-    private static final long RETURN_WEIGHT    = 2;
-    private static final long SPLIT_WEIGHT     = 40;
-    private static final long SWITCH_WEIGHT    = 8;
-    private static final long THROW_WEIGHT     = 2;
-    private static final long VAR_WEIGHT       = 40;
-    private static final long WITH_WEIGHT      = 8;
+    static final long FUNCTION_WEIGHT  = 40;
+    static final long AASTORE_WEIGHT   = 2;
+    static final long ACCESS_WEIGHT    = 4;
+    static final long ADD_WEIGHT       = 10;
+    static final long BREAK_WEIGHT     = 1;
+    static final long CALL_WEIGHT      = 10;
+    static final long CATCH_WEIGHT     = 10;
+    static final long CONTINUE_WEIGHT  = 1;
+    static final long IF_WEIGHT        = 2;
+    static final long LITERAL_WEIGHT   = 10;
+    static final long LOOP_WEIGHT      = 4;
+    static final long NEW_WEIGHT       = 6;
+    static final long FUNC_EXPR_WEIGHT = 20;
+    static final long RETURN_WEIGHT    = 2;
+    static final long SPLIT_WEIGHT     = 40;
+    static final long SWITCH_WEIGHT    = 8;
+    static final long THROW_WEIGHT     = 2;
+    static final long VAR_WEIGHT       = 40;
+    static final long WITH_WEIGHT      = 8;
 
     /** Accumulated weight. */
     private long weight;
@@ -100,7 +102,7 @@ final class WeighNodes extends NodeOperatorVisitor {
      * @param weightCache cache of already calculated block weights
      */
     private WeighNodes(FunctionNode topFunction, final Map<Node, Long> weightCache) {
-        super();
+        super(new LexicalContext());
         this.topFunction = topFunction;
         this.weightCache = weightCache;
     }
@@ -156,8 +158,8 @@ final class WeighNodes extends NodeOperatorVisitor {
     }
 
     @Override
-    public Node leaveExecuteNode(final ExecuteNode executeNode) {
-        return executeNode;
+    public Node leaveExpressionStatement(final ExpressionStatement expressionStatement) {
+        return expressionStatement;
     }
 
     @Override
@@ -209,6 +211,7 @@ final class WeighNodes extends NodeOperatorVisitor {
 
             if (units == null) {
                 for (final int postset : postsets) {
+                    weight += AASTORE_WEIGHT;
                     final Node element = value[postset];
 
                     if (element != null) {

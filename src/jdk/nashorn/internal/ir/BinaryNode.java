@@ -29,36 +29,51 @@ import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
 import jdk.nashorn.internal.parser.TokenType;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * BinaryNode nodes represent two operand operations.
  */
 @Immutable
-public final class BinaryNode extends Node implements Assignment<Node> {
+public final class BinaryNode extends Expression implements Assignment<Expression> {
     /** Left hand side argument. */
-    private final Node lhs;
+    private final Expression lhs;
 
-    private final Node rhs;
+    private final Expression rhs;
 
     /**
      * Constructor
      *
-     * @param source source code
      * @param token  token
      * @param lhs    left hand side
      * @param rhs    right hand side
      */
-    public BinaryNode(final Source source, final long token, final Node lhs, final Node rhs) {
-        super(source, token, lhs.getStart(), rhs.getFinish());
+    public BinaryNode(final long token, final Expression lhs, final Expression rhs) {
+        super(token, lhs.getStart(), rhs.getFinish());
         this.lhs   = lhs;
         this.rhs   = rhs;
     }
 
-    private BinaryNode(final BinaryNode binaryNode, final Node lhs, final Node rhs) {
+    private BinaryNode(final BinaryNode binaryNode, final Expression lhs, final Expression rhs) {
         super(binaryNode);
         this.lhs = lhs;
         this.rhs = rhs;
+    }
+
+    @Override
+    public boolean isComparison() {
+        switch (tokenType()) {
+        case EQ:
+        case EQ_STRICT:
+        case NE:
+        case NE_STRICT:
+        case LE:
+        case LT:
+        case GE:
+        case GT:
+            return true;
+        default:
+            return false;
+        }
     }
 
     /**
@@ -84,6 +99,7 @@ public final class BinaryNode extends Node implements Assignment<Node> {
         case DIV:
         case MOD:
         case MUL:
+        case SUB:
         case ASSIGN_DIV:
         case ASSIGN_MOD:
         case ASSIGN_MUL:
@@ -126,17 +142,17 @@ public final class BinaryNode extends Node implements Assignment<Node> {
     }
 
     @Override
-    public Node getAssignmentDest() {
+    public Expression getAssignmentDest() {
         return isAssignment() ? lhs() : null;
     }
 
     @Override
-    public Node setAssignmentDest(Node n) {
+    public BinaryNode setAssignmentDest(Expression n) {
         return setLHS(n);
     }
 
     @Override
-    public Node getAssignmentSource() {
+    public Expression getAssignmentSource() {
         return rhs();
     }
 
@@ -145,9 +161,9 @@ public final class BinaryNode extends Node implements Assignment<Node> {
      * @param visitor IR navigating visitor.
      */
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterBinaryNode(this)) {
-            return visitor.leaveBinaryNode(setLHS(lhs.accept(visitor)).setRHS(rhs.accept(visitor)));
+            return visitor.leaveBinaryNode(setLHS((Expression)lhs.accept(visitor)).setRHS((Expression)rhs.accept(visitor)));
         }
 
         return this;
@@ -203,7 +219,7 @@ public final class BinaryNode extends Node implements Assignment<Node> {
      * Get the left hand side expression for this node
      * @return the left hand side expression
      */
-    public Node lhs() {
+    public Expression lhs() {
         return lhs;
     }
 
@@ -211,7 +227,7 @@ public final class BinaryNode extends Node implements Assignment<Node> {
      * Get the right hand side expression for this node
      * @return the left hand side expression
      */
-    public Node rhs() {
+    public Expression rhs() {
         return rhs;
     }
 
@@ -220,7 +236,7 @@ public final class BinaryNode extends Node implements Assignment<Node> {
      * @param lhs new left hand side expression
      * @return a node equivalent to this one except for the requested change.
      */
-    public BinaryNode setLHS(final Node lhs) {
+    public BinaryNode setLHS(final Expression lhs) {
         if (this.lhs == lhs) {
             return this;
         }
@@ -232,7 +248,7 @@ public final class BinaryNode extends Node implements Assignment<Node> {
      * @param rhs new left hand side expression
      * @return a node equivalent to this one except for the requested change.
      */
-    public BinaryNode setRHS(final Node rhs) {
+    public BinaryNode setRHS(final Expression rhs) {
         if (this.rhs == rhs) {
             return this;
         }

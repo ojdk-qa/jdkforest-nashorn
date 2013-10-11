@@ -32,21 +32,15 @@ import jdk.nashorn.internal.ir.UnaryNode;
 
 /**
  * Like NodeVisitor but navigating further into operators.
+ * @param <T> Lexical context class for this NodeOperatorVisitor
  */
-public class NodeOperatorVisitor extends NodeVisitor {
-    /**
-     * Constructor
-     */
-    public NodeOperatorVisitor() {
-        super();
-    }
-
+public class NodeOperatorVisitor<T extends LexicalContext> extends NodeVisitor<T> {
     /**
      * Constructor
      *
      * @param lc a custom lexical context
      */
-    public NodeOperatorVisitor(final LexicalContext lc) {
+    public NodeOperatorVisitor(final T lc) {
         super(lc);
     }
 
@@ -149,7 +143,7 @@ public class NodeOperatorVisitor extends NodeVisitor {
             return enterASSIGN_SUB(binaryNode);
         case BIND:
             return enterBIND(binaryNode);
-         case BIT_AND:
+        case BIT_AND:
             return enterBIT_AND(binaryNode);
         case BIT_OR:
             return enterBIT_OR(binaryNode);
@@ -1269,6 +1263,4 @@ public class NodeOperatorVisitor extends NodeVisitor {
     public Node leaveSUB(final BinaryNode binaryNode) {
         return leaveDefault(binaryNode);
     }
-
-
 }

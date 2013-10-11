@@ -26,10 +26,9 @@
 package jdk.nashorn.internal.runtime.arrays;
 
 import java.lang.invoke.MethodHandle;
-import java.lang.reflect.Array;
 import jdk.nashorn.internal.runtime.GlobalObject;
+import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.PropertyDescriptor;
-import jdk.nashorn.internal.runtime.linker.Bootstrap;
 
 /**
  * ArrayData - abstraction for wrapping array elements
@@ -56,7 +55,7 @@ public abstract class ArrayData {
      * Constructor
      * @param length Virtual length of the array.
      */
-    public ArrayData(final long length) {
+    protected ArrayData(final long length) {
         this.length = length;
     }
 
@@ -75,8 +74,13 @@ public abstract class ArrayData {
      * @return ArrayData
      */
     public static ArrayData allocate(final int length) {
-        final ArrayData arrayData = new IntArrayData(length);
-        return length == 0 ? arrayData : new DeletedRangeArrayFilter(arrayData, 0, length - 1);
+        if (length == 0) {
+            return new IntArrayData();
+        } else if (length >= SparseArrayData.MAX_DENSE_LENGTH) {
+            return new SparseArrayData(EMPTY_ARRAY, length);
+        } else {
+            return new DeletedRangeArrayFilter(new IntArrayData(length), 0, length - 1);
+        }
     }
 
     /**
@@ -178,6 +182,14 @@ public abstract class ArrayData {
     }
 
     /**
+     * Return a copy of the array that can be modified without affecting this instance.
+     * It is safe to return themselves for immutable subclasses.
+     *
+     * @return a new array
+     */
+    public abstract ArrayData copy();
+
+    /**
      * Return a copy of the array data as an Object array.
      *
      * @return an Object array
@@ -191,20 +203,7 @@ public abstract class ArrayData {
      * @return and array of the given type
      */
     public Object asArrayOfType(final Class<?> componentType) {
-        final Object[] src = asObjectArray();
-        final int l = src.length;
-        final Object dst = Array.newInstance(componentType, l);
-        final MethodHandle converter = Bootstrap.getLinkerServices().getTypeConverter(Object.class, componentType);
-        try {
-            for (int i = 0; i < src.length; i++) {
-                Array.set(dst, i, invoke(converter, src[i]));
-            }
-        } catch (final RuntimeException | Error e) {
-            throw e;
-        } catch (final Throwable t) {
-            throw new RuntimeException(t);
-        }
-        return dst;
+        return JSType.convertArray(asObjectArray(), componentType);
     }
 
     /**
@@ -293,6 +292,29 @@ public abstract class ArrayData {
      * @return new array data (or same)
      */
     public abstract ArrayData set(int index, double value, boolean strict);
+
+    /**
+     * Set an empty value at a given index. Should only affect Object array.
+     *
+     * @param index the index
+     * @return new array data (or same)
+     */
+    public ArrayData setEmpty(final int index) {
+        // Do nothing.
+        return this;
+    }
+
+    /**
+     * Set an empty value for a given range. Should only affect Object array.
+     *
+     * @param lo range low end
+     * @param hi range high end
+     * @return new array data (or same)
+     */
+    public ArrayData setEmpty(final long lo, final long hi) {
+        // Do nothing.
+        return this;
+    }
 
     /**
      * Get an int value from a given index

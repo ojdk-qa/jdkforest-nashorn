@@ -44,9 +44,7 @@ import jdk.nashorn.internal.runtime.Undefined;
 
 /**
  * This is the main dynamic linker for Nashorn. It is used for linking all {@link ScriptObject} and its subclasses (this
- * includes {@link ScriptFunction} and its subclasses) as well as {@link Undefined}. This linker is exported to other
- * language runtimes by being declared in {@code META-INF/services/jdk.internal.dynalink.linker.GuardingDynamicLinker}
- * file of Nashorn's distribution.
+ * includes {@link ScriptFunction} and its subclasses) as well as {@link Undefined}.
  */
 final class NashornLinker implements TypeBasedGuardingDynamicLinker, GuardingTypeConverterFactory, ConversionComparator {
     /**

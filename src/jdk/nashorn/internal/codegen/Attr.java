@@ -26,14 +26,18 @@
 package jdk.nashorn.internal.codegen;
 
 import static jdk.nashorn.internal.codegen.CompilerConstants.ARGUMENTS;
+import static jdk.nashorn.internal.codegen.CompilerConstants.ARGUMENTS_VAR;
 import static jdk.nashorn.internal.codegen.CompilerConstants.CALLEE;
 import static jdk.nashorn.internal.codegen.CompilerConstants.EXCEPTION_PREFIX;
 import static jdk.nashorn.internal.codegen.CompilerConstants.ITERATOR_PREFIX;
+import static jdk.nashorn.internal.codegen.CompilerConstants.LITERAL_PREFIX;
 import static jdk.nashorn.internal.codegen.CompilerConstants.RETURN;
 import static jdk.nashorn.internal.codegen.CompilerConstants.SCOPE;
 import static jdk.nashorn.internal.codegen.CompilerConstants.SWITCH_TAG_PREFIX;
 import static jdk.nashorn.internal.codegen.CompilerConstants.THIS;
 import static jdk.nashorn.internal.codegen.CompilerConstants.VARARGS;
+import static jdk.nashorn.internal.ir.Symbol.IS_ALWAYS_DEFINED;
+import static jdk.nashorn.internal.ir.Symbol.IS_CONSTANT;
 import static jdk.nashorn.internal.ir.Symbol.IS_FUNCTION_SELF;
 import static jdk.nashorn.internal.ir.Symbol.IS_GLOBAL;
 import static jdk.nashorn.internal.ir.Symbol.IS_INTERNAL;
@@ -58,6 +62,7 @@ import jdk.nashorn.internal.ir.Block;
 import jdk.nashorn.internal.ir.CallNode;
 import jdk.nashorn.internal.ir.CaseNode;
 import jdk.nashorn.internal.ir.CatchNode;
+import jdk.nashorn.internal.ir.Expression;
 import jdk.nashorn.internal.ir.ForNode;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.FunctionNode.CompilationState;
@@ -69,12 +74,13 @@ import jdk.nashorn.internal.ir.LiteralNode;
 import jdk.nashorn.internal.ir.LiteralNode.ArrayLiteralNode;
 import jdk.nashorn.internal.ir.Node;
 import jdk.nashorn.internal.ir.ObjectNode;
-import jdk.nashorn.internal.ir.PropertyNode;
 import jdk.nashorn.internal.ir.ReturnNode;
 import jdk.nashorn.internal.ir.RuntimeNode;
 import jdk.nashorn.internal.ir.RuntimeNode.Request;
+import jdk.nashorn.internal.ir.Statement;
 import jdk.nashorn.internal.ir.SwitchNode;
 import jdk.nashorn.internal.ir.Symbol;
+import jdk.nashorn.internal.ir.TemporarySymbols;
 import jdk.nashorn.internal.ir.TernaryNode;
 import jdk.nashorn.internal.ir.TryNode;
 import jdk.nashorn.internal.ir.UnaryNode;
@@ -86,12 +92,9 @@ import jdk.nashorn.internal.parser.TokenType;
 import jdk.nashorn.internal.runtime.Context;
 import jdk.nashorn.internal.runtime.Debug;
 import jdk.nashorn.internal.runtime.DebugLogger;
-import jdk.nashorn.internal.runtime.ECMAException;
 import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.Property;
 import jdk.nashorn.internal.runtime.PropertyMap;
-import jdk.nashorn.internal.runtime.ScriptFunction;
-import jdk.nashorn.internal.runtime.ScriptObject;
 
 /**
  * This is the attribution pass of the code generator. Attr takes Lowered IR,
@@ -108,7 +111,7 @@ import jdk.nashorn.internal.runtime.ScriptObject;
  * computed.
  */
 
-final class Attr extends NodeOperatorVisitor {
+final class Attr extends NodeOperatorVisitor<LexicalContext> {
 
     /**
      * Local definitions in current block (to discriminate from function
@@ -126,16 +129,22 @@ final class Attr extends NodeOperatorVisitor {
 
     private final Deque<Type> returnTypes;
 
+    private int catchNestingLevel;
+
     private static final DebugLogger LOG   = new DebugLogger("attr");
     private static final boolean     DEBUG = LOG.isEnabled();
+
+    private final TemporarySymbols temporarySymbols;
 
     /**
      * Constructor.
      */
-    Attr() {
-        localDefs = new ArrayDeque<>();
-        localUses = new ArrayDeque<>();
-        returnTypes = new ArrayDeque<>();
+    Attr(final TemporarySymbols temporarySymbols) {
+        super(new LexicalContext());
+        this.temporarySymbols = temporarySymbols;
+        this.localDefs   = new ArrayDeque<>();
+        this.localUses   = new ArrayDeque<>();
+        this.returnTypes = new ArrayDeque<>();
     }
 
     @Override
@@ -150,99 +159,159 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveAccessNode(final AccessNode accessNode) {
-        ensureSymbol(Type.OBJECT, accessNode);  //While Object type is assigned here, Access Specialization in FinalizeTypes may narrow this
-        end(accessNode);
-        return accessNode;
+        //While Object type is assigned here, Access Specialization in FinalizeTypes may narrow this, that
+        //is why we can't set the access node base to be an object here, that will ruin access specialization
+        //for example for a.x | 17.
+        return end(ensureSymbol(Type.OBJECT, accessNode));
     }
 
-    private void enterFunctionBody() {
+    private void initFunctionWideVariables(final FunctionNode functionNode, final Block body) {
+        initCompileConstant(CALLEE, body, IS_PARAM | IS_INTERNAL);
+        initCompileConstant(THIS, body, IS_PARAM | IS_THIS, Type.OBJECT);
 
-        final FunctionNode functionNode = getLexicalContext().getCurrentFunction();
-        final Block body = getLexicalContext().getCurrentBlock();
-        initCallee(body);
-        initThis(body);
         if (functionNode.isVarArg()) {
-            initVarArg(body, functionNode.needsArguments());
+            initCompileConstant(VARARGS, body, IS_PARAM | IS_INTERNAL);
+            if (functionNode.needsArguments()) {
+                initCompileConstant(ARGUMENTS, body, IS_VAR | IS_INTERNAL | IS_ALWAYS_DEFINED);
+                final String argumentsName = ARGUMENTS_VAR.symbolName();
+                newType(defineSymbol(body, argumentsName, IS_VAR | IS_ALWAYS_DEFINED), Type.typeFor(ARGUMENTS_VAR.type()));
+                addLocalDef(argumentsName);
+            }
         }
 
         initParameters(functionNode, body);
-        initScope(body);
-        initReturn(body);
+        initCompileConstant(SCOPE, body, IS_VAR | IS_INTERNAL | IS_ALWAYS_DEFINED);
+        initCompileConstant(RETURN, body, IS_VAR | IS_INTERNAL | IS_ALWAYS_DEFINED, Type.OBJECT);
+    }
 
-        if (functionNode.isProgram()) {
-            initFromPropertyMap(body);
-        } else if(!functionNode.isDeclared()) {
-            // It's neither declared nor program - it's a function expression then; assign it a self-symbol.
 
-            if (functionNode.getSymbol() != null) {
-                // a temporary left over from an earlier pass when the function was lazy
-                assert functionNode.getSymbol().isTemp();
-                // remove it
-                functionNode.setSymbol(null);
-            }
-            final boolean anonymous = functionNode.isAnonymous();
-            final String name = anonymous ? null : functionNode.getIdent().getName();
-            if (anonymous || body.getExistingSymbol(name) != null) {
-                // The function is either anonymous, or another local identifier already trumps its name on entry:
-                // either it has the same name as one of its parameters, or is named "arguments" and also references the
-                // "arguments" identifier in its body.
-                ensureSymbol(functionNode, Type.typeFor(ScriptFunction.class), functionNode);
-            } else {
-                final Symbol selfSymbol = defineSymbol(body, name, IS_VAR | IS_FUNCTION_SELF, functionNode);
-                assert selfSymbol.isFunctionSelf();
-                newType(selfSymbol, Type.OBJECT);
-            }
-        }
-
-        /*
-         * This pushes all declarations (except for non-statements, i.e. for
-         * node temporaries) to the top of the function scope. This way we can
-         * get around problems like
-         *
-         * while (true) {
-         *   break;
-         *   if (true) {
-         *     var s;
-         *   }
-         * }
-         *
-         * to an arbitrary nesting depth.
-         *
-         * @see NASHORN-73
-         */
-
+    /**
+     * This pushes all declarations (except for non-statements, i.e. for
+     * node temporaries) to the top of the function scope. This way we can
+     * get around problems like
+     *
+     * while (true) {
+     *   break;
+     *   if (true) {
+     *     var s;
+     *   }
+     * }
+     *
+     * to an arbitrary nesting depth.
+     *
+     * see NASHORN-73
+     *
+     * @param functionNode the FunctionNode we are entering
+     * @param body the body of the FunctionNode we are entering
+     */
+    private void acceptDeclarations(final FunctionNode functionNode, final Block body) {
         // This visitor will assign symbol to all declared variables, except function declarations (which are taken care
         // in a separate step above) and "var" declarations in for loop initializers.
-        body.accept(new NodeOperatorVisitor() {
+        //
+        // It also handles the case that a variable can be undefined, e.g
+        // if (cond) {
+        //    x = x.y;
+        // }
+        // var x = 17;
+        //
+        // by making sure that no identifier has been found earlier in the body than the
+        // declaration - if such is the case the identifier is flagged as caBeUndefined to
+        // be safe if it turns into a local var. Otherwise corrupt bytecode results
+
+        body.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
+            private final Set<String> uses = new HashSet<>();
+            private final Set<String> canBeUndefined = new HashSet<>();
+
             @Override
             public boolean enterFunctionNode(final FunctionNode nestedFn) {
                 return false;
             }
 
             @Override
+            public Node leaveIdentNode(final IdentNode identNode) {
+                uses.add(identNode.getName());
+                return identNode;
+            }
+
+            @Override
             public boolean enterVarNode(final VarNode varNode) {
+                final String name = varNode.getName().getName();
+                //if this is used before the var node, the var node symbol needs to be tagged as can be undefined
+                if (uses.contains(name)) {
+                    canBeUndefined.add(name);
+                }
 
+                // all uses of the declared varnode inside the var node are potentially undefined
+                // however this is a bit conservative as e.g. var x = 17; var x = 1 + x; does work
+                if (!varNode.isFunctionDeclaration() && varNode.getInit() != null) {
+                    varNode.getInit().accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
+                       @Override
+                       public boolean enterIdentNode(final IdentNode identNode) {
+                           if (name.equals(identNode.getName())) {
+                              canBeUndefined.add(name);
+                           }
+                           return false;
+                       }
+                    });
+                }
+
+                return true;
+            }
+
+            @Override
+            public Node leaveVarNode(final VarNode varNode) {
                 // any declared symbols that aren't visited need to be typed as well, hence the list
-
                 if (varNode.isStatement()) {
-
-                    final IdentNode ident = varNode.getName();
-                    final Symbol symbol = defineSymbol(body, ident.getName(), IS_VAR, new IdentNode(ident));
+                    final IdentNode ident  = varNode.getName();
+                    final Symbol    symbol = defineSymbol(body, ident.getName(), IS_VAR);
+                    if (canBeUndefined.contains(ident.getName())) {
+                        symbol.setType(Type.OBJECT);
+                        symbol.setCanBeUndefined();
+                    }
                     functionNode.addDeclaredSymbol(symbol);
                     if (varNode.isFunctionDeclaration()) {
                         newType(symbol, FunctionNode.FUNCTION_TYPE);
                     }
+                    return varNode.setName((IdentNode)ident.setSymbol(lc, symbol));
                 }
-                return false;
+
+                return varNode;
             }
         });
+    }
+
+    private void enterFunctionBody() {
+
+        final FunctionNode functionNode = lc.getCurrentFunction();
+        final Block body = lc.getCurrentBlock();
+
+        initFunctionWideVariables(functionNode, body);
+
+        if (functionNode.isProgram()) {
+            initFromPropertyMap(body);
+        } else if (!functionNode.isDeclared()) {
+            // It's neither declared nor program - it's a function expression then; assign it a self-symbol.
+            assert functionNode.getSymbol() == null;
+
+            final boolean anonymous = functionNode.isAnonymous();
+            final String  name      = anonymous ? null : functionNode.getIdent().getName();
+            if (!(anonymous || body.getExistingSymbol(name) != null)) {
+                assert !anonymous && name != null;
+                newType(defineSymbol(body, name, IS_VAR | IS_FUNCTION_SELF), Type.OBJECT);
+            }
+        }
+
+        acceptDeclarations(functionNode, body);
     }
 
     @Override
     public boolean enterBlock(final Block block) {
         start(block);
+        //ensure that we don't use information from a previous compile. This is very ugly TODO
+        //the symbols in the block should really be stateless
+        block.clearSymbols();
 
-        if (getLexicalContext().isFunctionBody()) {
+        if (lc.isFunctionBody()) {
             enterFunctionBody();
         }
         pushLocalsBlock();
@@ -257,29 +326,43 @@ final class Attr extends NodeOperatorVisitor {
     }
 
     @Override
-    public Node leaveCallNode(final CallNode callNode) {
-        ensureSymbol(callNode.getType(), callNode);
-        return end(callNode);
-    }
-
-    @Override
     public boolean enterCallNode(final CallNode callNode) {
         return start(callNode);
     }
 
     @Override
+    public Node leaveCallNode(final CallNode callNode) {
+        return end(ensureSymbol(callNode.getType(), callNode));
+    }
+
+    @Override
     public boolean enterCatchNode(final CatchNode catchNode) {
         final IdentNode exception = catchNode.getException();
-        final Block     block     = getLexicalContext().getCurrentBlock();
+        final Block     block     = lc.getCurrentBlock();
 
         start(catchNode);
+        catchNestingLevel++;
 
         // define block-local exception variable
-        final Symbol def = defineSymbol(block, exception.getName(), IS_VAR | IS_LET, exception);
-        newType(def, Type.OBJECT);
-        addLocalDef(exception.getName());
+        final String exname = exception.getName();
+        final Symbol def = defineSymbol(block, exname, IS_VAR | IS_LET | IS_ALWAYS_DEFINED);
+        newType(def, Type.OBJECT); //we can catch anything, not just ecma exceptions
+
+        addLocalDef(exname);
 
         return true;
+    }
+
+    @Override
+    public Node leaveCatchNode(final CatchNode catchNode) {
+        final IdentNode exception = catchNode.getException();
+        final Block  block        = lc.getCurrentBlock();
+        final Symbol symbol       = findSymbol(block, exception.getName());
+
+        catchNestingLevel--;
+
+        assert symbol != null;
+        return end(catchNode.setException((IdentNode)exception.setSymbol(lc, symbol)));
     }
 
     /**
@@ -287,11 +370,10 @@ final class Attr extends NodeOperatorVisitor {
      *
      * @param name         Name of symbol.
      * @param symbolFlags  Symbol flags.
-     * @param node         Defining Node.
      *
      * @return Symbol for given name or null for redefinition.
      */
-    private Symbol defineSymbol(final Block block, final String name, final int symbolFlags, final Node node) {
+    private Symbol defineSymbol(final Block block, final String name, final int symbolFlags) {
         int    flags  = symbolFlags;
         Symbol symbol = findSymbol(block, name); // Locate symbol.
 
@@ -299,7 +381,7 @@ final class Attr extends NodeOperatorVisitor {
             flags |= IS_SCOPE;
         }
 
-        final FunctionNode function = getLexicalContext().getFunction(block);
+        final FunctionNode function = lc.getFunction(block);
         if (symbol != null) {
             // Symbol was already defined. Check if it needs to be redefined.
             if ((flags & KINDMASK) == IS_PARAM) {
@@ -332,22 +414,18 @@ final class Attr extends NodeOperatorVisitor {
             if ((flags & Symbol.KINDMASK) == IS_VAR && ((flags & IS_INTERNAL) == IS_INTERNAL || (flags & IS_LET) == IS_LET)) {
                 symbolBlock = block; //internal vars are always defined in the block closest to them
             } else {
-                symbolBlock = getLexicalContext().getFunctionBody(function);
+                symbolBlock = lc.getFunctionBody(function);
             }
 
             // Create and add to appropriate block.
             symbol = new Symbol(name, flags);
-            symbolBlock.putSymbol(name, symbol);
+            symbolBlock.putSymbol(lc, symbol);
 
             if ((flags & Symbol.KINDMASK) != IS_GLOBAL) {
                 symbol.setNeedsSlot(true);
             }
         } else if (symbol.less(flags)) {
             symbol.setFlags(flags);
-        }
-
-        if (node != null) {
-            node.setSymbol(symbol);
         }
 
         return symbol;
@@ -357,30 +435,22 @@ final class Attr extends NodeOperatorVisitor {
     public boolean enterFunctionNode(final FunctionNode functionNode) {
         start(functionNode, false);
 
-        if (functionNode.isDeclared()) {
-            final Iterator<Block> blocks = getLexicalContext().getBlocks();
-            if (blocks.hasNext()) {
-                defineSymbol(
-                    blocks.next(),
-                    functionNode.getIdent().getName(),
-                    IS_VAR,
-                    functionNode);
-            } else {
-                // Q: What's an outermost function in a lexical context that is not a program?
-                // A: It's a function being compiled lazily!
-                assert getLexicalContext().getOutermostFunction() == functionNode && !functionNode.isProgram();
-            }
+        if (functionNode.isLazy()) {
+            return false;
         }
 
-        if (functionNode.isLazy()) {
-            LOG.info("LAZY: ", functionNode.getName(), " => Promoting to OBJECT");
-            ensureSymbol(getLexicalContext().getCurrentFunction(), Type.OBJECT, functionNode);
-            end(functionNode);
-            return false;
+        //an outermost function in our lexical context that is not a program (runScript)
+        //is possible - it is a function being compiled lazily
+        if (functionNode.isDeclared()) {
+            final Iterator<Block> blocks = lc.getBlocks();
+            if (blocks.hasNext()) {
+                defineSymbol(blocks.next(), functionNode.getIdent().getName(), IS_VAR);
+            }
         }
 
         returnTypes.push(functionNode.getReturnType());
         pushLocalsFunction();
+
         return true;
     }
 
@@ -388,11 +458,30 @@ final class Attr extends NodeOperatorVisitor {
     public Node leaveFunctionNode(final FunctionNode functionNode) {
         FunctionNode newFunctionNode = functionNode;
 
-        final LexicalContext lc = getLexicalContext();
+        final Block body = newFunctionNode.getBody();
+
+        //look for this function in the parent block
+        if (functionNode.isDeclared()) {
+            final Iterator<Block> blocks = lc.getBlocks();
+            if (blocks.hasNext()) {
+                newFunctionNode = (FunctionNode)newFunctionNode.setSymbol(lc, findSymbol(blocks.next(), functionNode.getIdent().getName()));
+            }
+        } else if (!functionNode.isProgram()) {
+            final boolean anonymous = functionNode.isAnonymous();
+            final String  name      = anonymous ? null : functionNode.getIdent().getName();
+            if (anonymous || body.getExistingSymbol(name) != null) {
+                newFunctionNode = (FunctionNode)ensureSymbol(FunctionNode.FUNCTION_TYPE, newFunctionNode);
+            } else {
+                assert name != null;
+                final Symbol self = body.getExistingSymbol(name);
+                assert self != null && self.isFunctionSelf();
+                newFunctionNode = (FunctionNode)newFunctionNode.setSymbol(lc, body.getExistingSymbol(name));
+            }
+        }
 
         //unknown parameters are promoted to object type.
-        finalizeParameters(newFunctionNode);
-        finalizeTypes(newFunctionNode);
+        newFunctionNode = finalizeParameters(newFunctionNode);
+        newFunctionNode = finalizeTypes(newFunctionNode);
         for (final Symbol symbol : newFunctionNode.getDeclaredSymbols()) {
             if (symbol.getSymbolType().isUnknown()) {
                 symbol.setType(Type.OBJECT);
@@ -400,38 +489,34 @@ final class Attr extends NodeOperatorVisitor {
             }
         }
 
-        final Block body = newFunctionNode.getBody();
-
         if (newFunctionNode.hasLazyChildren()) {
             //the final body has already been assigned as we have left the function node block body by now
             objectifySymbols(body);
         }
 
+        List<VarNode> syntheticInitializers = null;
+
         if (body.getFlag(Block.NEEDS_SELF_SYMBOL)) {
-            final IdentNode callee = compilerConstant(CALLEE);
-            final VarNode selfInit =
-                new VarNode(
-                    newFunctionNode.getSource(),
-                    newFunctionNode.getToken(),
-                    newFunctionNode.getFinish(),
-                    newFunctionNode.getIdent(),
-                    callee);
+            syntheticInitializers = new ArrayList<>(2);
+            LOG.info("Accepting self symbol init for ", newFunctionNode.getName());
+            // "var fn = :callee"
+            syntheticInitializers.add(createSyntheticInitializer(newFunctionNode.getIdent(), CALLEE, newFunctionNode));
+        }
 
-            LOG.info("Accepting self symbol init ", selfInit, " for ", newFunctionNode.getName());
+        if(newFunctionNode.needsArguments()) {
+            if(syntheticInitializers == null) {
+                syntheticInitializers = new ArrayList<>(1);
+            }
+            // "var arguments = :arguments"
+            syntheticInitializers.add(createSyntheticInitializer(createImplicitIdentifier(ARGUMENTS_VAR.symbolName()),
+                    ARGUMENTS, newFunctionNode));
+        }
 
-            final List<Node> newStatements = new ArrayList<>();
-            newStatements.add(selfInit);
-            assert callee.getSymbol() != null && callee.getSymbol().hasSlot();
-
-            final IdentNode name       = selfInit.getName();
-            final Symbol    nameSymbol = body.getExistingSymbol(name.getName());
-
-            assert nameSymbol != null;
-
-            name.setSymbol(nameSymbol);
-            selfInit.setSymbol(nameSymbol);
-
-            newStatements.addAll(body.getStatements());
+        if(syntheticInitializers != null) {
+            final List<Statement> stmts = body.getStatements();
+            final List<Statement> newStatements = new ArrayList<>(stmts.size() + syntheticInitializers.size());
+            newStatements.addAll(syntheticInitializers);
+            newStatements.addAll(stmts);
             newFunctionNode = newFunctionNode.setBody(lc, body.setStatements(lc, newStatements));
         }
 
@@ -447,34 +532,50 @@ final class Attr extends NodeOperatorVisitor {
 
         end(newFunctionNode, false);
 
-        return newFunctionNode; //.setFlag(lc, lc.getFlags(functionNode));
+        return newFunctionNode;
+    }
+
+    /**
+     * Creates a synthetic initializer for a variable (a var statement that doesn't occur in the source code). Typically
+     * used to create assignmnent of {@code :callee} to the function name symbol in self-referential function
+     * expressions as well as for assignment of {@code :arguments} to {@code arguments}.
+     *
+     * @param name the ident node identifying the variable to initialize
+     * @param initConstant the compiler constant it is initialized to
+     * @param fn the function node the assignment is for
+     * @return a var node with the appropriate assignment
+     */
+    private VarNode createSyntheticInitializer(final IdentNode name, final CompilerConstants initConstant, final FunctionNode fn) {
+        final IdentNode init = compilerConstant(initConstant);
+        assert init.getSymbol() != null && init.getSymbol().hasSlot();
+
+        VarNode synthVar = new VarNode(fn.getLineNumber(), fn.getToken(), fn.getFinish(), name, init);
+
+        final Symbol nameSymbol = fn.getBody().getExistingSymbol(name.getName());
+        assert nameSymbol != null;
+
+        return synthVar.setName((IdentNode)name.setSymbol(lc, nameSymbol));
     }
 
     @Override
     public Node leaveCONVERT(final UnaryNode unaryNode) {
         assert false : "There should be no convert operators in IR during Attribution";
-        end(unaryNode);
-        return unaryNode;
+        return end(unaryNode);
     }
 
     @Override
-    public boolean enterIdentNode(final IdentNode identNode) {
+    public Node leaveIdentNode(final IdentNode identNode) {
         final String name = identNode.getName();
-
-        start(identNode);
 
         if (identNode.isPropertyName()) {
             // assign a pseudo symbol to property name
             final Symbol pseudoSymbol = pseudoSymbol(name);
             LOG.info("IdentNode is property name -> assigning pseudo symbol ", pseudoSymbol);
             LOG.unindent();
-            identNode.setSymbol(pseudoSymbol);
-            return false;
+            return end(identNode.setSymbol(lc, pseudoSymbol));
         }
 
-        final LexicalContext lc        = getLexicalContext();
-        final Block          block     = lc.getCurrentBlock();
-        final Symbol         oldSymbol = identNode.getSymbol();
+        final Block block = lc.getCurrentBlock();
 
         Symbol symbol = findSymbol(block, name);
 
@@ -487,20 +588,29 @@ final class Attr extends NodeOperatorVisitor {
                 assert lc.getFunctionBody(functionNode).getExistingSymbol(CALLEE.symbolName()) != null;
                 lc.setFlag(functionNode.getBody(), Block.NEEDS_SELF_SYMBOL);
                 newType(symbol, FunctionNode.FUNCTION_TYPE);
-            } else if (!identNode.isInitializedHere()) { // NASHORN-448
-                // here is a use outside the local def scope
-                if (!isLocalDef(name)) {
+            } else if (!identNode.isInitializedHere()) {
+                /*
+                 * See NASHORN-448, JDK-8016235
+                 *
+                 * Here is a use outside the local def scope
+                 * the inCatch check is a conservative approach to handle things that might have only been
+                 * defined in the try block, but with variable declarations, which due to JavaScript rules
+                 * have to be lifted up into the function scope outside the try block anyway, but as the
+                 * flow can fault at almost any place in the try block and get us to the catch block, all we
+                 * know is that we have a declaration, not a definition. This can be made better and less
+                 * conservative once we superimpose a CFG onto the AST.
+                 */
+                if (!isLocalDef(name) || inCatch()) {
                     newType(symbol, Type.OBJECT);
                     symbol.setCanBeUndefined();
                 }
             }
 
-            identNode.setSymbol(symbol);
             // if symbol is non-local or we're in a with block, we need to put symbol in scope (if it isn't already)
             maybeForceScope(symbol);
         } else {
             LOG.info("No symbol exists. Declare undefined: ", symbol);
-            symbol = defineSymbol(block, name, IS_GLOBAL, identNode);
+            symbol = defineSymbol(block, name, IS_GLOBAL);
             // we have never seen this before, it can be undefined
             newType(symbol, Type.OBJECT); // TODO unknown -we have explicit casts anyway?
             symbol.setCanBeUndefined();
@@ -509,14 +619,16 @@ final class Attr extends NodeOperatorVisitor {
 
         setBlockScope(name, symbol);
 
-        if (symbol != oldSymbol && !identNode.isInitializedHere()) {
+        if (!identNode.isInitializedHere()) {
             symbol.increaseUseCount();
         }
         addLocalUse(identNode.getName());
 
-        end(identNode);
+        return end(identNode.setSymbol(lc, symbol));
+    }
 
-        return false;
+    private boolean inCatch() {
+        return catchNestingLevel > 0;
     }
 
     /**
@@ -525,32 +637,32 @@ final class Attr extends NodeOperatorVisitor {
      * @param symbol the symbol that might be scoped
      */
     private void maybeForceScope(final Symbol symbol) {
-        if(!symbol.isScope() && symbolNeedsToBeScope(symbol)) {
-            Symbol.setSymbolIsScope(getLexicalContext(), symbol);
+        if (!symbol.isScope() && symbolNeedsToBeScope(symbol)) {
+            Symbol.setSymbolIsScope(lc, symbol);
         }
     }
 
     private boolean symbolNeedsToBeScope(Symbol symbol) {
-        if(symbol.isThis() || symbol.isInternal()) {
+        if (symbol.isThis() || symbol.isInternal()) {
             return false;
         }
         boolean previousWasBlock = false;
-        for(final Iterator<LexicalContextNode> it = getLexicalContext().getAllNodes(); it.hasNext();) {
+        for (final Iterator<LexicalContextNode> it = lc.getAllNodes(); it.hasNext();) {
             final LexicalContextNode node = it.next();
-            if(node instanceof FunctionNode) {
+            if (node instanceof FunctionNode) {
                 // We reached the function boundary without seeing a definition for the symbol - it needs to be in
                 // scope.
                 return true;
-            } else if(node instanceof WithNode) {
-                if(previousWasBlock) {
+            } else if (node instanceof WithNode) {
+                if (previousWasBlock) {
                     // We reached a WithNode; the symbol must be scoped. Note that if the WithNode was not immediately
                     // preceded by a block, this means we're currently processing its expression, not its body,
                     // therefore it doesn't count.
                     return true;
                 }
                 previousWasBlock = false;
-            } else if(node instanceof Block) {
-                if(((Block)node).getExistingSymbol(symbol.getName()) == symbol) {
+            } else if (node instanceof Block) {
+                if (((Block)node).getExistingSymbol(symbol.getName()) == symbol) {
                     // We reached the block that defines the symbol without reaching either the function boundary, or a
                     // WithNode. The symbol need not be scoped.
                     return false;
@@ -571,10 +683,8 @@ final class Attr extends NodeOperatorVisitor {
         }
 
         if (symbol.isScope()) {
-            final LexicalContext lc = getLexicalContext();
-
             Block scopeBlock = null;
-            for (final Iterator<LexicalContextNode> contextNodeIter = getLexicalContext().getAllNodes(); contextNodeIter.hasNext(); ) {
+            for (final Iterator<LexicalContextNode> contextNodeIter = lc.getAllNodes(); contextNodeIter.hasNext(); ) {
                 final LexicalContextNode node = contextNodeIter.next();
                 if (node instanceof Block) {
                     if (((Block)node).getExistingSymbol(name) != null) {
@@ -587,8 +697,8 @@ final class Attr extends NodeOperatorVisitor {
             }
 
             if (scopeBlock != null) {
-                assert getLexicalContext().contains(scopeBlock);
-                lc.setFlag(scopeBlock, Block.NEEDS_SCOPE);
+                assert lc.contains(scopeBlock);
+                lc.setBlockNeedsScope(scopeBlock);
             }
         }
     }
@@ -599,8 +709,8 @@ final class Attr extends NodeOperatorVisitor {
      * @see #needsParentScope()
      */
     private void setUsesGlobalSymbol() {
-        for (final Iterator<FunctionNode> fns = getLexicalContext().getFunctions(); fns.hasNext();) {
-            getLexicalContext().setFlag(fns.next(), FunctionNode.USES_ANCESTOR_SCOPE);
+        for (final Iterator<FunctionNode> fns = lc.getFunctions(); fns.hasNext();) {
+            lc.setFlag(fns.next(), FunctionNode.USES_ANCESTOR_SCOPE);
         }
     }
 
@@ -612,11 +722,11 @@ final class Attr extends NodeOperatorVisitor {
     private Symbol findSymbol(final Block block, final String name) {
         // Search up block chain to locate symbol.
 
-        for(final Iterator<Block> blocks = getLexicalContext().getBlocks(block); blocks.hasNext();) {
+        for (final Iterator<Block> blocks = lc.getBlocks(block); blocks.hasNext();) {
             // Find name.
             final Symbol symbol = blocks.next().getExistingSymbol(name);
             // If found then we are good.
-            if(symbol != null) {
+            if (symbol != null) {
                 return symbol;
             }
         }
@@ -625,39 +735,19 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveIndexNode(final IndexNode indexNode) {
-        ensureSymbol(Type.OBJECT, indexNode); //TODO
-        return indexNode;
+        return end(ensureSymbol(Type.OBJECT, indexNode));
     }
 
     @SuppressWarnings("rawtypes")
     @Override
-    public boolean enterLiteralNode(final LiteralNode literalNode) {
-        try {
-            start(literalNode);
-            assert !literalNode.isTokenType(TokenType.THIS) : "tokentype for " + literalNode + " is this"; //guard against old dead code case. literal nodes should never inherit tokens
-
-            if (literalNode instanceof ArrayLiteralNode) {
-                final ArrayLiteralNode arrayLiteralNode = (ArrayLiteralNode)literalNode;
-                final Node[]           array            = arrayLiteralNode.getValue();
-
-                for (int i = 0; i < array.length; i++) {
-                    final Node element = array[i];
-                    if (element != null) {
-                        array[i] = element.accept(this);
-                    }
-                }
-                arrayLiteralNode.analyze();
-                //array literal node now has an element type and all elements are attributed
-            } else {
-                assert !(literalNode.getValue() instanceof Node) : "literals with Node values not supported";
-            }
-
-            getLexicalContext().getCurrentFunction().newLiteral(literalNode);
-        } finally {
-            end(literalNode);
+    public Node leaveLiteralNode(final LiteralNode literalNode) {
+        assert !literalNode.isTokenType(TokenType.THIS) : "tokentype for " + literalNode + " is this"; //guard against old dead code case. literal nodes should never inherit tokens
+        assert literalNode instanceof ArrayLiteralNode || !(literalNode.getValue() instanceof Node) : "literals with Node values not supported";
+        final Symbol symbol = new Symbol(lc.getCurrentFunction().uniqueName(LITERAL_PREFIX.symbolName()), IS_CONSTANT, literalNode.getType());
+        if (literalNode instanceof ArrayLiteralNode) {
+            ((ArrayLiteralNode)literalNode).analyze();
         }
-
-        return false;
+        return end(literalNode.setSymbol(lc, symbol));
     }
 
     @Override
@@ -667,23 +757,13 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveObjectNode(final ObjectNode objectNode) {
-        ensureSymbol(Type.OBJECT, objectNode);
-        return end(objectNode);
-    }
-
-    //TODO is this correct why not leave?
-    @Override
-    public boolean enterPropertyNode(final PropertyNode propertyNode) {
-        // assign a pseudo symbol to property name, see NASHORN-710
-        start(propertyNode);
-        propertyNode.setSymbol(new Symbol(propertyNode.getKeyName(), 0, Type.OBJECT));
-        end(propertyNode);
-        return true;
+        return end(ensureSymbol(Type.OBJECT, objectNode));
     }
 
     @Override
     public Node leaveReturnNode(final ReturnNode returnNode) {
-        final Node expr = returnNode.getExpression();
+        final Expression expr = returnNode.getExpression();
+        final Type returnType;
 
         if (expr != null) {
             //we can't do parameter specialization if we return something that hasn't been typed yet
@@ -692,10 +772,12 @@ final class Attr extends NodeOperatorVisitor {
                 symbol.setType(Type.OBJECT);
             }
 
-            final Type returnType = Type.widest(returnTypes.pop(), symbol.getSymbolType());
-            returnTypes.push(returnType);
-            LOG.info("Returntype is now ", returnType);
+            returnType = Type.widest(returnTypes.pop(), symbol.getSymbolType());
+        } else {
+            returnType = Type.OBJECT; //undefined
         }
+        LOG.info("Returntype is now ", returnType);
+        returnTypes.push(returnType);
 
         end(returnNode);
 
@@ -717,7 +799,7 @@ final class Attr extends NodeOperatorVisitor {
                     final LiteralNode<?> lit = (LiteralNode<?>)test;
                     if (lit.isNumeric() && !(lit.getValue() instanceof Integer)) {
                         if (JSType.isRepresentableAsInt(lit.getNumber())) {
-                            newCaseNode = caseNode.setTest(LiteralNode.newInstance(lit, lit.getInt32()).accept(this));
+                            newCaseNode = caseNode.setTest((Expression)LiteralNode.newInstance(lit, lit.getInt32()).accept(this));
                         }
                     }
                 } else {
@@ -725,7 +807,12 @@ final class Attr extends NodeOperatorVisitor {
                     type = Type.OBJECT;
                 }
 
-                type = Type.widest(type, newCaseNode.getTest().getType());
+                final Type newCaseType = newCaseNode.getTest().getType();
+                if (newCaseType.isBoolean()) {
+                    type = Type.OBJECT; //booleans and integers aren't assignment compatible
+                } else {
+                    type = Type.widest(type, newCaseType);
+                }
             }
 
             newCases.add(newCaseNode);
@@ -736,11 +823,11 @@ final class Attr extends NodeOperatorVisitor {
             type = Type.OBJECT;
         }
 
-        switchNode.setTag(newInternal(getLexicalContext().getCurrentFunction().uniqueName(SWITCH_TAG_PREFIX.symbolName()), type));
+        switchNode.setTag(newInternal(lc.getCurrentFunction().uniqueName(SWITCH_TAG_PREFIX.symbolName()), type));
 
         end(switchNode);
 
-        return switchNode.setCases(getLexicalContext(), newCases);
+        return switchNode.setCases(lc, newCases);
     }
 
     @Override
@@ -763,11 +850,8 @@ final class Attr extends NodeOperatorVisitor {
         final IdentNode ident = varNode.getName();
         final String    name  = ident.getName();
 
-        final Symbol symbol = defineSymbol(getLexicalContext().getCurrentBlock(), name, IS_VAR, ident);
+        final Symbol symbol = defineSymbol(lc.getCurrentBlock(), name, IS_VAR);
         assert symbol != null;
-
-        LOG.info("VarNode ", varNode, " set symbol ", symbol);
-        varNode.setSymbol(symbol);
 
         // NASHORN-467 - use before definition of vars - conservative
         if (isLocalUse(ident.getName())) {
@@ -780,22 +864,29 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveVarNode(final VarNode varNode) {
-        final Node      init  = varNode.getInit();
-        final IdentNode ident = varNode.getName();
-        final String    name  = ident.getName();
+        final Expression init  = varNode.getInit();
+        final IdentNode  ident = varNode.getName();
+        final String     name  = ident.getName();
+
+        final Symbol  symbol = findSymbol(lc.getCurrentBlock(), name);
+        assert ident.getSymbol() == symbol;
 
         if (init == null) {
             // var x; with no init will be treated like a use of x by
-            // visit(IdentNode) unless we remove the name
-            // from the localdef list.
+            // leaveIdentNode unless we remove the name from the localdef list.
             removeLocalDef(name);
-            return varNode;
+            return end(varNode);
         }
 
         addLocalDef(name);
 
-        final Symbol  symbol   = varNode.getSymbol();
-        final boolean isScript = getLexicalContext().getDefiningFunction(symbol).isProgram(); //see NASHORN-56
+        assert symbol != null;
+
+        final IdentNode newIdent = (IdentNode)ident.setSymbol(lc, symbol);
+
+        final VarNode newVarNode = varNode.setName(newIdent);
+
+        final boolean isScript = lc.getDefiningFunction(symbol).isProgram(); //see NASHORN-56
         if ((init.getType().isNumeric() || init.getType().isBoolean()) && !isScript) {
             // Forbid integers as local vars for now as we have no way to treat them as undefined
             newType(symbol, init.getType());
@@ -803,47 +894,38 @@ final class Attr extends NodeOperatorVisitor {
             newType(symbol, Type.OBJECT);
         }
 
-        assert varNode.hasType() : varNode;
+        assert newVarNode.getName().hasType() : newVarNode + " has no type";
 
-        end(varNode);
-
-        return varNode;
+        return end(newVarNode);
     }
 
     @Override
     public Node leaveADD(final UnaryNode unaryNode) {
-        ensureSymbol(arithType(), unaryNode);
-        end(unaryNode);
-        return unaryNode;
+        return end(ensureSymbol(arithType(), unaryNode));
     }
 
     @Override
     public Node leaveBIT_NOT(final UnaryNode unaryNode) {
-        ensureSymbol(Type.INT, unaryNode);
-        end(unaryNode);
-        return unaryNode;
+        return end(ensureSymbol(Type.INT, unaryNode));
     }
 
     @Override
     public Node leaveDECINC(final UnaryNode unaryNode) {
         // @see assignOffset
-        ensureAssignmentSlots(getLexicalContext().getCurrentFunction(), unaryNode.rhs());
         final Type type = arithType();
         newType(unaryNode.rhs().getSymbol(), type);
-        ensureSymbol(type, unaryNode);
-        end(unaryNode);
-        return unaryNode;
+        return end(ensureSymbol(type, unaryNode));
     }
 
     @Override
     public Node leaveDELETE(final UnaryNode unaryNode) {
-        final FunctionNode   currentFunctionNode = getLexicalContext().getCurrentFunction();
+        final FunctionNode   currentFunctionNode = lc.getCurrentFunction();
         final boolean        strictMode          = currentFunctionNode.isStrict();
-        final Node           rhs                 = unaryNode.rhs();
-        final Node           strictFlagNode      = LiteralNode.newInstance(unaryNode, strictMode).accept(this);
+        final Expression     rhs                 = unaryNode.rhs();
+        final Expression     strictFlagNode      = (Expression)LiteralNode.newInstance(unaryNode, strictMode).accept(this);
 
         Request request = Request.DELETE;
-        final List<Node> args = new ArrayList<>();
+        final List<Expression> args = new ArrayList<>();
 
         if (rhs instanceof IdentNode) {
             // If this is a declared variable or a function parameter, delete always fails (except for globals).
@@ -854,7 +936,7 @@ final class Attr extends NodeOperatorVisitor {
             if (failDelete && rhs.getSymbol().isThis()) {
                 return LiteralNode.newInstance(unaryNode, true).accept(this);
             }
-            final Node literalNode = LiteralNode.newInstance(unaryNode, name).accept(this);
+            final Expression literalNode = (Expression)LiteralNode.newInstance(unaryNode, name).accept(this);
 
             if (!failDelete) {
                 args.add(compilerConstant(SCOPE));
@@ -866,16 +948,17 @@ final class Attr extends NodeOperatorVisitor {
                 request = Request.FAIL_DELETE;
             }
         } else if (rhs instanceof AccessNode) {
-            final Node      base     = ((AccessNode)rhs).getBase();
-            final IdentNode property = ((AccessNode)rhs).getProperty();
+            final Expression base     = ((AccessNode)rhs).getBase();
+            final IdentNode  property = ((AccessNode)rhs).getProperty();
 
             args.add(base);
-            args.add(LiteralNode.newInstance(unaryNode, property.getName()).accept(this));
+            args.add((Expression)LiteralNode.newInstance(unaryNode, property.getName()).accept(this));
             args.add(strictFlagNode);
 
         } else if (rhs instanceof IndexNode) {
-            final Node base  = ((IndexNode)rhs).getBase();
-            final Node index = ((IndexNode)rhs).getIndex();
+            final IndexNode indexNode = (IndexNode)rhs;
+            final Expression base  = indexNode.getBase();
+            final Expression index = indexNode.getIndex();
 
             args.add(base);
             args.add(index);
@@ -897,10 +980,10 @@ final class Attr extends NodeOperatorVisitor {
      * @return true if the symbol denoted by the specified name in the current lexical context defined in the program level.
      */
     private boolean isProgramLevelSymbol(final String name) {
-        for(final Iterator<Block> it = getLexicalContext().getBlocks(); it.hasNext();) {
+        for(final Iterator<Block> it = lc.getBlocks(); it.hasNext();) {
             final Block next = it.next();
             if(next.getExistingSymbol(name) != null) {
-                return next == getLexicalContext().getFunctionBody(getLexicalContext().getOutermostFunction());
+                return next == lc.getFunctionBody(lc.getOutermostFunction());
             }
         }
         throw new AssertionError("Couldn't find symbol " + name + " in the context");
@@ -908,36 +991,40 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveNEW(final UnaryNode unaryNode) {
-        ensureSymbol(Type.OBJECT, unaryNode);
-        end(unaryNode);
-        return unaryNode;
+        return end(ensureSymbol(Type.OBJECT, unaryNode));
     }
 
     @Override
     public Node leaveNOT(final UnaryNode unaryNode) {
-        ensureSymbol(Type.BOOLEAN, unaryNode);
-        end(unaryNode);
-        return unaryNode;
+        return end(ensureSymbol(Type.BOOLEAN, unaryNode));
     }
 
     private IdentNode compilerConstant(CompilerConstants cc) {
-        final FunctionNode functionNode = getLexicalContext().getCurrentFunction();
-        final IdentNode node = new IdentNode(functionNode.getSource(), functionNode.getToken(), functionNode.getFinish(), cc.symbolName());
-        node.setSymbol(functionNode.compilerConstant(cc));
-        return node;
+        return (IdentNode)createImplicitIdentifier(cc.symbolName()).setSymbol(lc, lc.getCurrentFunction().compilerConstant(cc));
+    }
+
+    /**
+     * Creates an ident node for an implicit identifier within the function (one not declared in the script source
+     * code). These identifiers are defined with function's token and finish.
+     * @param name the name of the identifier
+     * @return an ident node representing the implicit identifier.
+     */
+    private IdentNode createImplicitIdentifier(final String name) {
+        final FunctionNode fn = lc.getCurrentFunction();
+        return new IdentNode(fn.getToken(), fn.getFinish(), name);
     }
 
     @Override
     public Node leaveTYPEOF(final UnaryNode unaryNode) {
-        final Node rhs = unaryNode.rhs();
+        final Expression rhs = unaryNode.rhs();
 
-        List<Node> args = new ArrayList<>();
+        List<Expression> args = new ArrayList<>();
         if (rhs instanceof IdentNode && !rhs.getSymbol().isParam() && !rhs.getSymbol().isVar()) {
             args.add(compilerConstant(SCOPE));
-            args.add(LiteralNode.newInstance(rhs, ((IdentNode)rhs).getName()).accept(this)); //null
+            args.add((Expression)LiteralNode.newInstance(rhs, ((IdentNode)rhs).getName()).accept(this)); //null
         } else {
             args.add(rhs);
-            args.add(LiteralNode.newInstance(unaryNode).accept(this)); //null, do not reuse token of identifier rhs, it can be e.g. 'this'
+            args.add((Expression)LiteralNode.newInstance(unaryNode).accept(this)); //null, do not reuse token of identifier rhs, it can be e.g. 'this'
         }
 
         RuntimeNode runtimeNode = new RuntimeNode(unaryNode, Request.TYPEOF, args);
@@ -952,23 +1039,17 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveRuntimeNode(final RuntimeNode runtimeNode) {
-        ensureSymbol(runtimeNode.getRequest().getReturnType(), runtimeNode);
-        return runtimeNode;
+        return end(ensureSymbol(runtimeNode.getRequest().getReturnType(), runtimeNode));
     }
 
     @Override
     public Node leaveSUB(final UnaryNode unaryNode) {
-        ensureSymbol(arithType(), unaryNode);
-        end(unaryNode);
-        return unaryNode;
+        return end(ensureSymbol(arithType(), unaryNode));
     }
 
     @Override
     public Node leaveVOID(final UnaryNode unaryNode) {
-        final RuntimeNode runtimeNode = (RuntimeNode)new RuntimeNode(unaryNode, Request.VOID).accept(this);
-        assert runtimeNode.getSymbol().getSymbolType().isObject();
-        end(unaryNode);
-        return runtimeNode;
+        return end(ensureSymbol(Type.OBJECT, unaryNode));
     }
 
     /**
@@ -977,23 +1058,21 @@ final class Attr extends NodeOperatorVisitor {
      */
     @Override
     public Node leaveADD(final BinaryNode binaryNode) {
-        final Node lhs = binaryNode.lhs();
-        final Node rhs = binaryNode.rhs();
+        final Expression lhs = binaryNode.lhs();
+        final Expression rhs = binaryNode.rhs();
 
         ensureTypeNotUnknown(lhs);
         ensureTypeNotUnknown(rhs);
-        ensureSymbol(Type.widest(lhs.getType(), rhs.getType()), binaryNode);
-
-        end(binaryNode);
-
-        return binaryNode;
+        //even if we are adding two known types, this can overflow. i.e.
+        //int and number -> number.
+        //int and int are also number though.
+        //something and object is object
+        return end(ensureSymbol(Type.widest(arithType(), Type.widest(lhs.getType(), rhs.getType())), binaryNode));
     }
 
     @Override
     public Node leaveAND(final BinaryNode binaryNode) {
-        ensureSymbol(Type.OBJECT, binaryNode);
-        end(binaryNode);
-        return binaryNode;
+        return end(ensureSymbol(Type.OBJECT, binaryNode));
     }
 
     /**
@@ -1006,15 +1085,14 @@ final class Attr extends NodeOperatorVisitor {
         final Node lhs = binaryNode.lhs();
 
         if (lhs instanceof IdentNode) {
-            final Block     block = getLexicalContext().getCurrentBlock();
+            final Block     block = lc.getCurrentBlock();
             final IdentNode ident = (IdentNode)lhs;
             final String    name  = ident.getName();
 
             Symbol symbol = findSymbol(block, name);
 
             if (symbol == null) {
-                symbol = defineSymbol(block, name, IS_GLOBAL, ident);
-                binaryNode.setSymbol(symbol);
+                symbol = defineSymbol(block, name, IS_GLOBAL);
             } else {
                 maybeForceScope(symbol);
             }
@@ -1025,8 +1103,33 @@ final class Attr extends NodeOperatorVisitor {
         return true;
     }
 
+
+    /**
+     * This assign helper is called after an assignment, when all children of
+     * the assign has been processed. It fixes the types and recursively makes
+     * sure that everyhing has slots that should have them in the chain.
+     *
+     * @param binaryNode assignment node
+     */
+    private Node leaveAssignmentNode(final BinaryNode binaryNode) {
+        BinaryNode newBinaryNode = binaryNode;
+
+        final Expression lhs = binaryNode.lhs();
+        final Expression rhs = binaryNode.rhs();
+        final Type type;
+
+        if (rhs.getType().isNumeric()) {
+            type = Type.widest(binaryNode.lhs().getType(), binaryNode.rhs().getType());
+        } else {
+            type = Type.OBJECT; //force lhs to be an object if not numeric assignment, e.g. strings too.
+        }
+
+        newType(lhs.getSymbol(), type);
+        return end(ensureSymbol(type, newBinaryNode));
+    }
+
     private boolean isLocal(FunctionNode function, Symbol symbol) {
-        final FunctionNode definingFn = getLexicalContext().getDefiningFunction(symbol);
+        final FunctionNode definingFn = lc.getDefiningFunction(symbol);
         // Temp symbols are not assigned to a block, so their defining fn is null; those can be assumed local
         return definingFn == null || definingFn == function;
     }
@@ -1048,8 +1151,8 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveASSIGN_ADD(final BinaryNode binaryNode) {
-        final Node lhs = binaryNode.lhs();
-        final Node rhs = binaryNode.rhs();
+        final Expression lhs = binaryNode.lhs();
+        final Expression rhs = binaryNode.rhs();
 
         final Type widest = Type.widest(lhs.getType(), rhs.getType());
         //Type.NUMBER if we can't prove that the add doesn't overflow. todo
@@ -1173,14 +1276,12 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveCOMMARIGHT(final BinaryNode binaryNode) {
-        ensureSymbol(binaryNode.rhs().getType(), binaryNode);
-        return binaryNode;
+        return end(ensureSymbol(binaryNode.rhs().getType(), binaryNode));
     }
 
     @Override
     public Node leaveCOMMALEFT(final BinaryNode binaryNode) {
-        ensureSymbol(binaryNode.lhs().getType(), binaryNode);
-        return binaryNode;
+        return end(ensureSymbol(binaryNode.lhs().getType(), binaryNode));
     }
 
     @Override
@@ -1189,15 +1290,10 @@ final class Attr extends NodeOperatorVisitor {
     }
 
     private Node leaveCmp(final BinaryNode binaryNode) {
-        final Node lhs = binaryNode.lhs();
-        final Node rhs = binaryNode.rhs();
+        ensureTypeNotUnknown(binaryNode.lhs());
+        ensureTypeNotUnknown(binaryNode.rhs());
 
-        ensureSymbol(Type.BOOLEAN, binaryNode);
-        ensureTypeNotUnknown(lhs);
-        ensureTypeNotUnknown(rhs);
-
-        end(binaryNode);
-        return binaryNode;
+        return end(ensureSymbol(Type.BOOLEAN, binaryNode));
     }
 
     private Node coerce(final BinaryNode binaryNode, final Type operandType, final Type destType) {
@@ -1207,11 +1303,9 @@ final class Attr extends NodeOperatorVisitor {
         // as, say, an int : function(x) { return x & 4711 }, and x is not defined in
         // the function. to make this work, uncomment the following two type inferences
         // and debug.
-
         //newType(binaryNode.lhs().getSymbol(), operandType);
         //newType(binaryNode.rhs().getSymbol(), operandType);
-        ensureSymbol(destType, binaryNode);
-        return binaryNode;
+        return ensureSymbol(destType, binaryNode);
     }
 
     private Node coerce(final BinaryNode binaryNode, final Type type) {
@@ -1295,9 +1389,7 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveOR(final BinaryNode binaryNode) {
-        ensureSymbol(Type.OBJECT, binaryNode);
-        end(binaryNode);
-        return binaryNode;
+        return end(ensureSymbol(Type.OBJECT, binaryNode));
     }
 
     @Override
@@ -1323,7 +1415,7 @@ final class Attr extends NodeOperatorVisitor {
     @Override
     public Node leaveForNode(final ForNode forNode) {
         if (forNode.isForIn()) {
-            forNode.setIterator(newInternal(getLexicalContext().getCurrentFunction().uniqueName(ITERATOR_PREFIX.symbolName()), Type.OBJECT)); //NASHORN-73
+            forNode.setIterator(newInternal(lc.getCurrentFunction().uniqueName(ITERATOR_PREFIX.symbolName()), Type.typeFor(ITERATOR_PREFIX.type()))); //NASHORN-73
             /*
              * Iterators return objects, so we need to widen the scope of the
              * init variable if it, for example, has been assigned double type
@@ -1339,57 +1431,27 @@ final class Attr extends NodeOperatorVisitor {
 
     @Override
     public Node leaveTernaryNode(final TernaryNode ternaryNode) {
-        final Node lhs  = ternaryNode.rhs();
-        final Node rhs  = ternaryNode.third();
+        final Expression trueExpr  = ternaryNode.getTrueExpression();
+        final Expression falseExpr = ternaryNode.getFalseExpression();
 
-        ensureTypeNotUnknown(lhs);
-        ensureTypeNotUnknown(rhs);
+        ensureTypeNotUnknown(trueExpr);
+        ensureTypeNotUnknown(falseExpr);
 
-        final Type type = Type.widest(lhs.getType(), rhs.getType());
-        ensureSymbol(type, ternaryNode);
-
-        end(ternaryNode);
-        assert ternaryNode.getSymbol() != null;
-
-        return ternaryNode;
+        final Type type = Type.widest(trueExpr.getType(), falseExpr.getType());
+        return end(ensureSymbol(type, ternaryNode));
     }
 
-    private void initThis(final Block block) {
-        final Symbol thisSymbol = defineSymbol(block, THIS.symbolName(), IS_PARAM | IS_THIS, null);
-        newType(thisSymbol, Type.OBJECT);
-        thisSymbol.setNeedsSlot(true);
+    private void initCompileConstant(final CompilerConstants cc, final Block block, final int flags) {
+        final Class<?> type = cc.type();
+        // Must not call this method for constants with no explicit types; use the one with (..., Type) signature instead.
+        assert type != null;
+        initCompileConstant(cc, block, flags, Type.typeFor(type));
     }
 
-    private void initScope(final Block block) {
-        final Symbol scopeSymbol = defineSymbol(block, SCOPE.symbolName(), IS_VAR | IS_INTERNAL, null);
-        newType(scopeSymbol, Type.typeFor(ScriptObject.class));
-        scopeSymbol.setNeedsSlot(true);
-    }
-
-    private void initReturn(final Block block) {
-        final Symbol returnSymbol = defineSymbol(block, RETURN.symbolName(), IS_VAR | IS_INTERNAL, null);
-        newType(returnSymbol, Type.OBJECT);
-        returnSymbol.setNeedsSlot(true);
-        //return symbol is always object as it's the __return__ thing. What returnType is is another matter though
-    }
-
-    private void initVarArg(final Block block, final boolean needsArguments) {
-        final Symbol varArgsSymbol = defineSymbol(block, VARARGS.symbolName(), IS_PARAM | IS_INTERNAL, null);
-        varArgsSymbol.setTypeOverride(Type.OBJECT_ARRAY);
-        varArgsSymbol.setNeedsSlot(true);
-
-        if (needsArguments) {
-            final Symbol    argumentsSymbol = defineSymbol(block, ARGUMENTS.symbolName(), IS_VAR | IS_INTERNAL, null);
-            newType(argumentsSymbol, Type.typeFor(ScriptObject.class));
-            argumentsSymbol.setNeedsSlot(true);
-            addLocalDef(ARGUMENTS.symbolName());
-        }
-    }
-
-    private void initCallee(final Block block) {
-        final Symbol calleeSymbol = defineSymbol(block, CALLEE.symbolName(), IS_PARAM | IS_INTERNAL, null);
-        newType(calleeSymbol, FunctionNode.FUNCTION_TYPE);
-        calleeSymbol.setNeedsSlot(true);
+    private void initCompileConstant(final CompilerConstants cc, final Block block, final int flags, final Type type) {
+        final Symbol symbol = defineSymbol(block, cc.symbolName(), flags);
+        symbol.setTypeOverride(type);
+        symbol.setNeedsSlot(true);
     }
 
     /**
@@ -1399,19 +1461,26 @@ final class Attr extends NodeOperatorVisitor {
      * @param functionNode the function node
      */
     private void initParameters(final FunctionNode functionNode, final Block body) {
+        int pos = 0;
         for (final IdentNode param : functionNode.getParameters()) {
             addLocalDef(param.getName());
-            final Symbol paramSymbol = defineSymbol(body, param.getName(), IS_PARAM, param);
-            if (paramSymbol != null) {
-                final Type callSiteParamType = functionNode.getSpecializedType(param);
-                if (callSiteParamType != null) {
-                    LOG.info("Param ", paramSymbol, " has a callsite type ", callSiteParamType, ". Using that.");
-                }
-                newType(paramSymbol, callSiteParamType == null ? Type.UNKNOWN : callSiteParamType);
+
+            final Type callSiteParamType = functionNode.getHints().getParameterType(pos);
+            int flags = IS_PARAM;
+            if (callSiteParamType != null) {
+                LOG.info("Param ", param, " has a callsite type ", callSiteParamType, ". Using that.");
+                flags |= Symbol.IS_SPECIALIZED_PARAM;
             }
 
-            LOG.info("Initialized param ", paramSymbol);
+            final Symbol paramSymbol = defineSymbol(body, param.getName(), flags);
+            assert paramSymbol != null;
+
+            newType(paramSymbol, callSiteParamType == null ? Type.UNKNOWN : callSiteParamType);
+
+            LOG.info("Initialized param ", pos, "=", paramSymbol);
+            pos++;
         }
+
     }
 
     /**
@@ -1420,23 +1489,34 @@ final class Attr extends NodeOperatorVisitor {
      *
      * @param functionNode functionNode
      */
-    private static void finalizeParameters(final FunctionNode functionNode) {
+    private FunctionNode finalizeParameters(final FunctionNode functionNode) {
+        final List<IdentNode> newParams = new ArrayList<>();
         final boolean isVarArg = functionNode.isVarArg();
+        final int nparams = functionNode.getParameters().size();
 
-        for (final IdentNode ident : functionNode.getParameters()) {
-            final Symbol paramSymbol = ident.getSymbol();
+        int specialize = 0;
+        int pos = 0;
+        for (final IdentNode param : functionNode.getParameters()) {
+            final Symbol paramSymbol = functionNode.getBody().getExistingSymbol(param.getName());
+            assert paramSymbol != null;
+            assert paramSymbol.isParam();
+            newParams.add((IdentNode)param.setSymbol(lc, paramSymbol));
 
             assert paramSymbol != null;
-            Type type = functionNode.getSpecializedType(ident);
+            Type type = functionNode.getHints().getParameterType(pos);
             if (type == null) {
                 type = Type.OBJECT;
             }
 
             // if we know that a parameter is only used as a certain type throughout
             // this function, we can tell the runtime system that no matter what the
-            // call site is, use this information. TODO
-            if (!paramSymbol.getSymbolType().isObject()) {
-                LOG.finest("Parameter ", ident, " could profit from specialization to ", paramSymbol.getSymbolType());
+            // call site is, use this information:
+            // we also need more than half of the parameters to be specializable
+            // for the heuristic to be worth it, and we need more than one use of
+            // the parameter to consider it, i.e. function(x) { call(x); } doens't count
+            if (paramSymbol.getUseCount() > 1 && !paramSymbol.getSymbolType().isObject()) {
+                LOG.finest("Parameter ", param, " could profit from specialization to ", paramSymbol.getSymbolType());
+                specialize++;
             }
 
             newType(paramSymbol, Type.widest(type, paramSymbol.getSymbolType()));
@@ -1445,7 +1525,17 @@ final class Attr extends NodeOperatorVisitor {
             if (isVarArg) {
                 paramSymbol.setNeedsSlot(false);
             }
+
+            pos++;
         }
+
+        FunctionNode newFunctionNode = functionNode;
+
+        if (nparams == 0 || (specialize * 2) < nparams) {
+            newFunctionNode = newFunctionNode.clearSnapshot(lc);
+        }
+
+        return newFunctionNode.setParameters(lc, newParams);
     }
 
     /**
@@ -1459,13 +1549,13 @@ final class Attr extends NodeOperatorVisitor {
 
         for (final Property property : map.getProperties()) {
             final String key    = property.getKey();
-            final Symbol symbol = defineSymbol(block, key, IS_GLOBAL, null);
+            final Symbol symbol = defineSymbol(block, key, IS_GLOBAL);
             newType(symbol, Type.OBJECT);
             LOG.info("Added global symbol from property map ", symbol);
         }
     }
 
-    private static void ensureTypeNotUnknown(final Node node) {
+    private static void ensureTypeNotUnknown(final Expression node) {
 
         final Symbol symbol = node.getSymbol();
 
@@ -1498,7 +1588,7 @@ final class Attr extends NodeOperatorVisitor {
          * objects as parameters, for example +, but not *, which is known
          * to coerce types into doubles
          */
-        if (node.getType().isUnknown() || symbol.isParam()) {
+        if (node.getType().isUnknown() || (symbol.isParam() && !symbol.isSpecializedParam())) {
             newType(symbol, Type.OBJECT);
             symbol.setCanBeUndefined();
          }
@@ -1509,34 +1599,7 @@ final class Attr extends NodeOperatorVisitor {
     }
 
     private Symbol exceptionSymbol() {
-        return newInternal(getLexicalContext().getCurrentFunction().uniqueName(EXCEPTION_PREFIX.symbolName()), Type.typeFor(ECMAException.class));
-    }
-
-    /**
-     * In an assignment, recursively make sure that there are slots for
-     * everything that has to be laid out as temporary storage, which is the
-     * case if we are assign-op:ing a BaseNode subclass. This has to be
-     * recursive to handle things like multi dimensional arrays as lhs
-     *
-     * see NASHORN-258
-     *
-     * @param functionNode   the current function node (has to be passed as it changes in the visitor below)
-     * @param assignmentDest the destination node of the assignment, e.g. lhs for binary nodes
-     */
-    private static void ensureAssignmentSlots(final FunctionNode functionNode, final Node assignmentDest) {
-        assignmentDest.accept(new NodeVisitor() {
-            @Override
-            public Node leaveIndexNode(final IndexNode indexNode) {
-                assert indexNode.getSymbol().isTemp();
-                final Node index = indexNode.getIndex();
-                //only temps can be set as needing slots. the others will self resolve
-                //it is illegal to take a scope var and force it to be a slot, that breaks
-                if (index.getSymbol().isTemp() && !index.getSymbol().isConstant()) {
-                     index.getSymbol().setNeedsSlot(true);
-                }
-                return indexNode;
-            }
-        });
+        return newInternal(lc.getCurrentFunction().uniqueName(EXCEPTION_PREFIX.symbolName()), Type.typeFor(EXCEPTION_PREFIX.type()));
     }
 
     /**
@@ -1557,22 +1620,30 @@ final class Attr extends NodeOperatorVisitor {
      *
      * @param functionNode
      */
-    private static void finalizeTypes(final FunctionNode functionNode) {
+    private FunctionNode finalizeTypes(final FunctionNode functionNode) {
         final Set<Node> changed = new HashSet<>();
+        FunctionNode currentFunctionNode = functionNode;
         do {
             changed.clear();
-            functionNode.accept(new NodeVisitor() {
+            final FunctionNode newFunctionNode = (FunctionNode)currentFunctionNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
 
-                private void widen(final Node node, final Type to) {
+                private Expression widen(final Expression node, final Type to) {
                     if (node instanceof LiteralNode) {
-                        return;
+                        return node;
                     }
                     Type from = node.getType();
                     if (!Type.areEquivalent(from, to) && Type.widest(from, to) == to) {
-                        LOG.fine("Had to post pass widen '", node, "' " + Debug.id(node), " from ", node.getType(), " to ", to);
-                        newType(node.getSymbol(), to);
-                        changed.add(node);
+                        LOG.fine("Had to post pass widen '", node, "' ", Debug.id(node), " from ", node.getType(), " to ", to);
+                        Symbol symbol = node.getSymbol();
+                        if(symbol.isShared() && symbol.wouldChangeType(to)) {
+                            symbol = temporarySymbols.getTypedTemporarySymbol(to);
+                        }
+                        newType(symbol, to);
+                        final Expression newNode = node.setSymbol(lc, symbol);
+                        changed.add(newNode);
+                        return newNode;
                     }
+                    return node;
                 }
 
                 @Override
@@ -1598,43 +1669,23 @@ final class Attr extends NodeOperatorVisitor {
                 @Override
                 public Node leaveBinaryNode(final BinaryNode binaryNode) {
                     final Type widest = Type.widest(binaryNode.lhs().getType(), binaryNode.rhs().getType());
+                    BinaryNode newBinaryNode = binaryNode;
                     switch (binaryNode.tokenType()) {
                     default:
                         if (!binaryNode.isAssignment() || binaryNode.isSelfModifying()) {
                             break;
                         }
-                        widen(binaryNode.lhs(), widest);
+                        newBinaryNode = newBinaryNode.setLHS(widen(newBinaryNode.lhs(), widest));
                     case ADD:
-                        widen(binaryNode, widest);
-                        break;
+                        newBinaryNode = (BinaryNode)widen(newBinaryNode, widest);
                     }
-                    return binaryNode;
+                    return newBinaryNode;
                 }
             });
+            lc.replace(currentFunctionNode, newFunctionNode);
+            currentFunctionNode = newFunctionNode;
         } while (!changed.isEmpty());
-    }
-
-    /**
-     * This assign helper is called after an assignment, when all children of
-     * the assign has been processed. It fixes the types and recursively makes
-     * sure that everyhing has slots that should have them in the chain.
-     *
-     * @param binaryNode assignment node
-     */
-    private Node leaveAssignmentNode(final BinaryNode binaryNode) {
-        final Node lhs = binaryNode.lhs();
-        final Node rhs = binaryNode.rhs();
-
-        final Type type;
-        if (rhs.getType().isNumeric()) {
-            type = Type.widest(binaryNode.lhs().getType(), binaryNode.rhs().getType());
-        } else {
-            type = Type.OBJECT; //force lhs to be an object if not numeric assignment, e.g. strings too.
-        }
-        ensureSymbol(type, binaryNode);
-        newType(lhs.getSymbol(), type);
-        end(binaryNode);
-        return binaryNode;
+        return currentFunctionNode;
     }
 
     private Node leaveSelfModifyingAssignmentNode(final BinaryNode binaryNode) {
@@ -1643,28 +1694,21 @@ final class Attr extends NodeOperatorVisitor {
 
     private Node leaveSelfModifyingAssignmentNode(final BinaryNode binaryNode, final Type destType) {
         //e.g. for -=, Number, no wider, destType (binaryNode.getWidestOperationType())  is the coerce type
-        final Node lhs = binaryNode.lhs();
+        final Expression lhs = binaryNode.lhs();
 
         newType(lhs.getSymbol(), destType); //may not narrow if dest is already wider than destType
-        ensureSymbol(destType, binaryNode); //for OP= nodes, the node can carry a narrower types than its lhs rhs. This is perfectly fine
+//        ensureSymbol(destType, binaryNode); //for OP= nodes, the node can carry a narrower types than its lhs rhs. This is perfectly fine
 
-        ensureAssignmentSlots(getLexicalContext().getCurrentFunction(), binaryNode);
-
-        end(binaryNode);
-        return binaryNode;
+        return end(ensureSymbol(destType, binaryNode));
     }
 
-    private Symbol ensureSymbol(final FunctionNode functionNode, final Type type, final Node node) {
-        LOG.info("New TEMPORARY added to ", functionNode.getName(), " type=", type);
-        return functionNode.ensureSymbol(getLexicalContext().getCurrentBlock(), type, node);
-    }
-
-    private Symbol ensureSymbol(final Type type, final Node node) {
-        return ensureSymbol(getLexicalContext().getCurrentFunction(), type, node);
+    private Expression ensureSymbol(final Type type, final Expression expr) {
+        LOG.info("New TEMPORARY added to ", lc.getCurrentFunction().getName(), " type=", type);
+        return temporarySymbols.ensureSymbol(lc, type, expr);
     }
 
     private Symbol newInternal(final String name, final Type type) {
-        final Symbol iter = defineSymbol(getLexicalContext().getCurrentBlock(), name, IS_VAR | IS_INTERNAL, null);
+        final Symbol iter = defineSymbol(lc.getCurrentBlock(), name, IS_VAR | IS_INTERNAL);
         iter.setType(type); // NASHORN-73
         return iter;
     }
@@ -1689,8 +1733,8 @@ final class Attr extends NodeOperatorVisitor {
     }
 
     private void pushLocalsBlock() {
-        localDefs.push(localDefs.isEmpty() ? new HashSet<String>() : new HashSet<>(localDefs.peek()));
-        localUses.push(localUses.isEmpty() ? new HashSet<String>() : new HashSet<>(localUses.peek()));
+        localDefs.push(new HashSet<>(localDefs.peek()));
+        localUses.push(new HashSet<>(localUses.peek()));
     }
 
     private void popLocals() {
@@ -1729,10 +1773,9 @@ final class Attr extends NodeOperatorVisitor {
      * @param body body for the function node we are leaving
      */
     private static void objectifySymbols(final Block body) {
-        body.accept(new NodeVisitor() {
+        body.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
             private void toObject(final Block block) {
-                for (final Iterator<Symbol> iter = block.symbolIterator(); iter.hasNext();) {
-                    final Symbol symbol = iter.next();
+                for (final Symbol symbol : block.getSymbols()) {
                     if (!symbol.isTemp()) {
                         newType(symbol, Type.OBJECT);
                     }
@@ -1774,7 +1817,7 @@ final class Attr extends NodeOperatorVisitor {
                 append("] ").
                 append(printNode ? node.toString() : "").
                 append(" in '").
-                append(getLexicalContext().getCurrentFunction().getName()).
+                append(lc.getCurrentFunction().getName()).
                 append("'");
             LOG.info(sb);
             LOG.indent();
@@ -1783,11 +1826,15 @@ final class Attr extends NodeOperatorVisitor {
         return true;
     }
 
-    private Node end(final Node node) {
+    private <T extends Node> T end(final T node) {
         return end(node, true);
     }
 
-    private Node end(final Node node, final boolean printNode) {
+    private <T extends Node> T end(final T node, final boolean printNode) {
+        if(node instanceof Statement) {
+            // If we're done with a statement, all temporaries can be reused.
+            temporarySymbols.reuse();
+        }
         if (DEBUG) {
             final StringBuilder sb = new StringBuilder();
 
@@ -1796,12 +1843,16 @@ final class Attr extends NodeOperatorVisitor {
                 append("] ").
                 append(printNode ? node.toString() : "").
                 append(" in '").
-                append(getLexicalContext().getCurrentFunction().getName());
+                append(lc.getCurrentFunction().getName()).
+                append('\'');
 
-            if (node.getSymbol() == null) {
-                sb.append(" <NO SYMBOL>");
-            } else {
-                sb.append(" <symbol=").append(node.getSymbol()).append('>');
+            if (node instanceof Expression) {
+                final Symbol symbol = ((Expression)node).getSymbol();
+                if (symbol == null) {
+                    sb.append(" <NO SYMBOL>");
+                } else {
+                    sb.append(" <symbol=").append(symbol).append('>');
+                }
             }
 
             LOG.unindent();

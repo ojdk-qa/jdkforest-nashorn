@@ -26,6 +26,7 @@
 package jdk.nashorn.internal.parser;
 
 import static jdk.nashorn.internal.parser.TokenType.ADD;
+import static jdk.nashorn.internal.parser.TokenType.COMMENT;
 import static jdk.nashorn.internal.parser.TokenType.DECIMAL;
 import static jdk.nashorn.internal.parser.TokenType.EOF;
 import static jdk.nashorn.internal.parser.TokenType.EOL;
@@ -83,12 +84,70 @@ public class Lexer extends Scanner {
     /** Type of last token added. */
     private TokenType last;
 
-    private static final String JAVASCRIPT_WHITESPACE;
-    private static final String JAVASCRIPT_WHITESPACE_EOL;
-    private static final String JAVASCRIPT_WHITESPACE_IN_REGEXP;
+    private static final String SPACETAB = " \t";  // ASCII space and tab
+    private static final String LFCR     = "\n\r"; // line feed and carriage return (ctrl-m)
 
-    private static final String JSON_WHITESPACE;
-    private static final String JSON_WHITESPACE_EOL;
+    private static final String JSON_WHITESPACE_EOL = LFCR;
+    private static final String JSON_WHITESPACE     = SPACETAB + LFCR;
+
+    private static final String JAVASCRIPT_WHITESPACE_EOL =
+        LFCR +
+        "\u2028" + // line separator
+        "\u2029"   // paragraph separator
+        ;
+    private static final String JAVASCRIPT_WHITESPACE =
+        SPACETAB +
+        JAVASCRIPT_WHITESPACE_EOL +
+        "\u000b" + // tabulation line
+        "\u000c" + // ff (ctrl-l)
+        "\u00a0" + // Latin-1 space
+        "\u1680" + // Ogham space mark
+        "\u180e" + // separator, Mongolian vowel
+        "\u2000" + // en quad
+        "\u2001" + // em quad
+        "\u2002" + // en space
+        "\u2003" + // em space
+        "\u2004" + // three-per-em space
+        "\u2005" + // four-per-em space
+        "\u2006" + // six-per-em space
+        "\u2007" + // figure space
+        "\u2008" + // punctuation space
+        "\u2009" + // thin space
+        "\u200a" + // hair space
+        "\u202f" + // narrow no-break space
+        "\u205f" + // medium mathematical space
+        "\u3000" + // ideographic space
+        "\ufeff"   // byte order mark
+        ;
+
+    private static final String JAVASCRIPT_WHITESPACE_IN_REGEXP =
+        "\\u000a" + // line feed
+        "\\u000d" + // carriage return (ctrl-m)
+        "\\u2028" + // line separator
+        "\\u2029" + // paragraph separator
+        "\\u0009" + // tab
+        "\\u0020" + // ASCII space
+        "\\u000b" + // tabulation line
+        "\\u000c" + // ff (ctrl-l)
+        "\\u00a0" + // Latin-1 space
+        "\\u1680" + // Ogham space mark
+        "\\u180e" + // separator, Mongolian vowel
+        "\\u2000" + // en quad
+        "\\u2001" + // em quad
+        "\\u2002" + // en space
+        "\\u2003" + // em space
+        "\\u2004" + // three-per-em space
+        "\\u2005" + // four-per-em space
+        "\\u2006" + // six-per-em space
+        "\\u2007" + // figure space
+        "\\u2008" + // punctuation space
+        "\\u2009" + // thin space
+        "\\u200a" + // hair space
+        "\\u202f" + // narrow no-break space
+        "\\u205f" + // medium mathematical space
+        "\\u3000" + // ideographic space
+        "\\ufeff"   // byte order mark
+        ;
 
     static String unicodeEscape(final char ch) {
         final StringBuilder sb = new StringBuilder();
@@ -102,65 +161,6 @@ public class Lexer extends Scanner {
         sb.append(hex);
 
         return sb.toString();
-    }
-
-    static {
-        final StringBuilder ws       = new StringBuilder();
-        final StringBuilder wsEOL    = new StringBuilder();
-        final StringBuilder wsRegExp = new StringBuilder();
-        final StringBuilder jsonWs   = new StringBuilder();
-
-        jsonWs.append((char)0x000a);
-        jsonWs.append((char)0x000d);
-        JSON_WHITESPACE_EOL = jsonWs.toString();
-
-        jsonWs.append((char)0x0009);
-        jsonWs.append((char)0x0020);
-        JSON_WHITESPACE = jsonWs.toString();
-
-        for (int i = 0; i <= 0xffff; i++) {
-           switch (i) {
-            case 0x000a: // line feed
-            case 0x000d: // carriage return (ctrl-m)
-            case 0x2028: // line separator
-            case 0x2029: // paragraph separator
-                wsEOL.append((char)i);
-            case 0x0009: // tab
-            case 0x0020: // ASCII space
-            case 0x000b: // tabulation line
-            case 0x000c: // ff (ctrl-l)
-            case 0x00a0: // Latin-1 space
-            case 0x1680: // Ogham space mark
-            case 0x180e: // separator, Mongolian vowel
-            case 0x2000: // en quad
-            case 0x2001: // em quad
-            case 0x2002: // en space
-            case 0x2003: // em space
-            case 0x2004: // three-per-em space
-            case 0x2005: // four-per-em space
-            case 0x2006: // six-per-em space
-            case 0x2007: // figure space
-            case 0x2008: // punctuation space
-            case 0x2009: // thin space
-            case 0x200a: // hair space
-            case 0x202f: // narrow no-break space
-            case 0x205f: // medium mathematical space
-            case 0x3000: // ideographic space
-            case 0xfeff: // byte order mark
-                ws.append((char)i);
-
-                wsRegExp.append(Lexer.unicodeEscape((char)i));
-                break;
-
-            default:
-                break;
-            }
-        }
-
-        JAVASCRIPT_WHITESPACE = ws.toString();
-        JAVASCRIPT_WHITESPACE_EOL = wsEOL.toString();
-        JAVASCRIPT_WHITESPACE_IN_REGEXP = wsRegExp.toString();
-
     }
 
     /**
@@ -427,6 +427,9 @@ public class Lexer extends Scanner {
      * @return True if a comment.
      */
     protected boolean skipComments() {
+        // Save the current position.
+        final int start = position;
+
         if (ch0 == '/') {
             // Is it a // comment.
             if (ch1 == '/') {
@@ -437,10 +440,9 @@ public class Lexer extends Scanner {
                     skip(1);
                 }
                 // Did detect a comment.
+                add(COMMENT, start);
                 return true;
             } else if (ch1 == '*') {
-                // Record beginning of comment.
-                final int start = position;
                 // Skip over /*.
                 skip(2);
                 // Scan for */.
@@ -462,11 +464,11 @@ public class Lexer extends Scanner {
                 }
 
                 // Did detect a comment.
+                add(COMMENT, start);
                 return true;
             }
-        }
-
-        if (scripting && ch0 == '#') {
+        } else if (ch0 == '#') {
+            assert scripting;
             // shell style comment
             // Skip over #.
             skip(1);
@@ -475,6 +477,7 @@ public class Lexer extends Scanner {
                 skip(1);
             }
             // Did detect a comment.
+            add(COMMENT, start);
             return true;
         }
 
@@ -546,14 +549,27 @@ public class Lexer extends Scanner {
     }
 
     /**
+     * interface to receive line information for multi-line literals.
+     */
+    protected interface LineInfoReceiver {
+        /**
+         * Receives line information
+         * @param line last line number
+         * @param linePosition position of last line
+         */
+        public void lineInfo(int line, int linePosition);
+    }
+
+    /**
      * Check whether the given token represents the beginning of a literal. If so scan
      * the literal and return <tt>true</tt>, otherwise return false.
      *
      * @param token the token.
      * @param startTokenType the token type.
+     * @param lir LineInfoReceiver that receives line info for multi-line string literals.
      * @return True if a literal beginning with startToken was found and scanned.
      */
-    protected boolean scanLiteral(final long token, final TokenType startTokenType) {
+    protected boolean scanLiteral(final long token, final TokenType startTokenType, final LineInfoReceiver lir) {
         // Check if it can be a literal.
         if (!canStartLiteral(startTokenType)) {
             return false;
@@ -569,7 +585,7 @@ public class Lexer extends Scanner {
             return scanRegEx();
         } else if (ch0 == '<') {
             if (ch1 == '<') {
-                return scanHereString();
+                return scanHereString(lir);
             } else if (Character.isJavaIdentifierStart(ch1)) {
                 return scanXMLLiteral();
             }
@@ -648,7 +664,7 @@ public class Lexer extends Scanner {
      *
      * @return The converted digit or -1 if invalid.
      */
-    private static int convertDigit(final char ch, final int base) {
+    protected static int convertDigit(final char ch, final int base) {
         int digit;
 
         if ('0' <= ch && ch <= '9') {
@@ -666,40 +682,51 @@ public class Lexer extends Scanner {
 
 
     /**
-     * Get the value of a numeric sequence.
+     * Get the value of a hexadecimal numeric sequence.
      *
-     * @param base  Numeric base.
-     * @param max   Maximum number of digits.
-     * @param skip  Skip over escape first.
-     * @param check Tells whether to throw error if a digit is invalid for the given base.
-     * @param type  Type of token to report against.
-     *
+     * @param length Number of digits.
+     * @param type   Type of token to report against.
      * @return Value of sequence or < 0 if no digits.
      */
-    private int valueOfSequence(final int base, final int max, final boolean skip, final boolean check, final TokenType type) {
-        assert base == 16 || base == 8 : "base other than 16 or 8";
-        final boolean isHex = base == 16;
-        final int shift = isHex ? 4 : 3;
+    private int hexSequence(final int length, final TokenType type) {
         int value = 0;
 
-        if (skip) {
-            skip(2);
-        }
-
-        for (int i = 0; i < max; i++) {
-            final int digit = convertDigit(ch0, base);
+        for (int i = 0; i < length; i++) {
+            final int digit = convertDigit(ch0, 16);
 
             if (digit == -1) {
-                if (check) {
-                    error(Lexer.message("invalid." + (isHex ? "hex" : "octal")), type, position, limit);
-                }
+                error(Lexer.message("invalid.hex"), type, position, limit);
                 return i == 0 ? -1 : value;
             }
 
-            value = value << shift | digit;
+            value = digit | value << 4;
             skip(1);
         }
 
+        return value;
+    }
+
+    /**
+     * Get the value of an octal numeric sequence. This parses up to 3 digits with a maximum value of 255.
+     *
+     * @return Value of sequence.
+     */
+    private int octalSequence() {
+        int value = 0;
+
+        for (int i = 0; i < 3; i++) {
+            final int digit = convertDigit(ch0, 8);
+
+            if (digit == -1) {
+                break;
+            }
+            value = digit | value << 3;
+            skip(1);
+
+            if (i == 1 && value >= 32) {
+                break;
+            }
+        }
         return value;
     }
 
@@ -724,7 +751,8 @@ public class Lexer extends Scanner {
         while (!atEOF() && position < end && !isEOL(ch0)) {
             // If escape character.
             if (ch0 == '\\' && ch1 == 'u') {
-                final int ch = valueOfSequence(16, 4, true, true, TokenType.IDENT);
+                skip(2);
+                final int ch = hexSequence(4, TokenType.IDENT);
                 if (isWhitespace((char)ch)) {
                     return null;
                 }
@@ -815,7 +843,7 @@ public class Lexer extends Scanner {
                     }
                     reset(afterSlash);
                     // Octal sequence.
-                    final int ch = valueOfSequence(8, 3, false, false, STRING);
+                    final int ch = octalSequence();
 
                     if (ch < 0) {
                         sb.append('\\');
@@ -862,7 +890,7 @@ public class Lexer extends Scanner {
                     break;
                 case 'x': {
                     // Hex sequence.
-                    final int ch = valueOfSequence(16, 2, false, true, STRING);
+                    final int ch = hexSequence(2, STRING);
 
                     if (ch < 0) {
                         sb.append('\\');
@@ -874,7 +902,7 @@ public class Lexer extends Scanner {
                     break;
                 case 'u': {
                     // Unicode sequence.
-                    final int ch = valueOfSequence(16, 4, false, true, STRING);
+                    final int ch = hexSequence(4, STRING);
 
                     if (ch < 0) {
                         sb.append('\\');
@@ -907,8 +935,9 @@ public class Lexer extends Scanner {
 
     /**
      * Scan over a string literal.
+     * @param add true if we nare not just scanning but should actually modify the token stream
      */
-    private void scanString(final boolean add) {
+    protected void scanString(final boolean add) {
         // Type of string.
         TokenType type = STRING;
         // Record starting quote.
@@ -925,6 +954,9 @@ public class Lexer extends Scanner {
             if (ch0 == '\\') {
                 type = ESCSTRING;
                 skip(1);
+                if (! isEscapeCharacter(ch0)) {
+                    error(Lexer.message("invalid.escape.char"), STRING, position, limit);
+                }
                 if (isEOL(ch0)) {
                     // Multiline string literal
                     skipEOL(false);
@@ -979,6 +1011,16 @@ public class Lexer extends Scanner {
     }
 
     /**
+     * Is the given character a valid escape char after "\" ?
+     *
+     * @param ch character to be checked
+     * @return if the given character is valid after "\"
+     */
+    protected boolean isEscapeCharacter(final char ch) {
+        return true;
+    }
+
+    /**
      * Convert string to number.
      *
      * @param valueString  String to convert.
@@ -1024,7 +1066,7 @@ public class Lexer extends Scanner {
     /**
      * Scan a number.
      */
-    private void scanNumber() {
+    protected void scanNumber() {
         // Record beginning of number.
         final int start = position;
         // Assume value is a decimal.
@@ -1088,6 +1130,10 @@ public class Lexer extends Scanner {
 
                 type = FLOATING;
             }
+        }
+
+        if (Character.isJavaIdentifierStart(ch0)) {
+            error(Lexer.message("missing.space.after.number"), type, position, 1);
         }
 
         // Add number token.
@@ -1178,7 +1224,8 @@ public class Lexer extends Scanner {
 
         // Make sure first character is valid start character.
         if (ch0 == '\\' && ch1 == 'u') {
-            final int ch = valueOfSequence(16, 4, true, true, TokenType.IDENT);
+            skip(2);
+            final int ch = hexSequence(4, TokenType.IDENT);
 
             if (!Character.isJavaIdentifierStart(ch)) {
                 error(Lexer.message("illegal.identifier.character"), TokenType.IDENT, start, position);
@@ -1191,7 +1238,8 @@ public class Lexer extends Scanner {
         // Make sure remaining characters are valid part characters.
         while (!atEOF()) {
             if (ch0 == '\\' && ch1 == 'u') {
-                final int ch = valueOfSequence(16, 4, true, true, TokenType.IDENT);
+                skip(2);
+                final int ch = hexSequence(4, TokenType.IDENT);
 
                 if (!Character.isJavaIdentifierPart(ch)) {
                     error(Lexer.message("illegal.identifier.character"), TokenType.IDENT, start, position);
@@ -1385,7 +1433,7 @@ public class Lexer extends Scanner {
      *
      * @return TRUE if is a here string.
      */
-    private boolean scanHereString() {
+    private boolean scanHereString(final LineInfoReceiver lir) {
         assert ch0 == '<' && ch1 == '<';
         if (scripting) {
             // Record beginning of here string.
@@ -1414,7 +1462,12 @@ public class Lexer extends Scanner {
 
             // Record rest of line.
             final State restState = saveState();
+            // keep line number updated
+            int lastLine = line;
+
             skipLine(false);
+            lastLine++;
+            int lastLinePosition = position;
             restState.setLimit(position);
 
             // Record beginning of string.
@@ -1431,8 +1484,13 @@ public class Lexer extends Scanner {
                 }
 
                 skipLine(false);
+                lastLine++;
+                lastLinePosition = position;
                 stringEnd = position;
             }
+
+            // notify last line information
+            lir.lineInfo(lastLine, lastLinePosition);
 
             // Record end of string.
             stringState.setLimit(stringEnd);
@@ -1583,7 +1641,13 @@ public class Lexer extends Scanner {
         return null;
     }
 
-    private static String message(final String msgId, final String... args) {
+    /**
+     * Get the correctly localized error message for a given message id format arguments
+     * @param msgId message id
+     * @param args  format arguments
+     * @return message
+     */
+    protected static String message(final String msgId, final String... args) {
         return ECMAErrors.getMessage("lexer.error." + msgId, args);
     }
 

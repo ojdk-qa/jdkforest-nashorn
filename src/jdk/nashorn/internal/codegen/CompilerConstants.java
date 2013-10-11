@@ -29,6 +29,7 @@ import static jdk.nashorn.internal.lookup.Lookup.MH;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.util.Iterator;
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.runtime.ScriptFunction;
 import jdk.nashorn.internal.runtime.ScriptObject;
@@ -99,31 +100,35 @@ public enum CompilerConstants {
     CALLEE(":callee", ScriptFunction.class),
 
     /** the varargs variable when necessary */
-    VARARGS(":varargs"),
+    VARARGS(":varargs", Object[].class),
 
-    /** the arguments vector when necessary and the slot */
-    ARGUMENTS("arguments", Object.class, 2),
+    /** the arguments variable (visible to function body). Initially set to ARGUMENTS, but can be reassigned by code in
+     * the function body.*/
+    ARGUMENTS_VAR("arguments", Object.class),
+
+    /** the internal arguments object, when necessary (not visible to scripts, can't be reassigned). */
+    ARGUMENTS(":arguments", ScriptObject.class),
 
     /** prefix for iterators for for (x in ...) */
-    ITERATOR_PREFIX(":iter"),
+    ITERATOR_PREFIX(":i", Iterator.class),
 
     /** prefix for tag variable used for switch evaluation */
-    SWITCH_TAG_PREFIX(":tag"),
+    SWITCH_TAG_PREFIX(":s"),
 
     /** prefix for all exceptions */
-    EXCEPTION_PREFIX(":exception"),
+    EXCEPTION_PREFIX(":e", Throwable.class),
 
     /** prefix for quick slots generated in Store */
-    QUICK_PREFIX(":quick"),
+    QUICK_PREFIX(":q"),
 
     /** prefix for temporary variables */
-    TEMP_PREFIX(":temp"),
+    TEMP_PREFIX(":t"),
 
     /** prefix for literals */
-    LITERAL_PREFIX(":lit"),
+    LITERAL_PREFIX(":l"),
 
     /** prefix for regexps */
-    REGEX_PREFIX(":regex"),
+    REGEX_PREFIX(":r"),
 
     /** "this" used in non-static Java methods; always in slot 0 */
     JAVA_THIS(null, 0),
@@ -262,7 +267,7 @@ public enum CompilerConstants {
      * @return the internal descriptor for this type
      */
     public static String typeDescriptor(final Class<?> clazz) {
-        return Type.getDescriptor(clazz);
+        return Type.typeFor(clazz).getDescriptor();
     }
 
     /**
@@ -488,20 +493,6 @@ public enum CompilerConstants {
     }
 
     /**
-     * Create a static call, looking up the method handle for it at the same time
-     *
-     * @param clazz  the class
-     * @param name   the name of the method
-     * @param rtype  the return type of the method
-     * @param ptypes the parameter types of the method
-     *
-     * @return the call object representing the static call
-     */
-    public static Call staticCall(final Class<?> clazz, final String name, final Class<?> rtype, final Class<?>... ptypes) {
-        return staticCall(MethodHandles.publicLookup(), clazz, name, rtype, ptypes);
-    }
-
-    /**
      * Create a static call, given an explicit lookup, looking up the method handle for it at the same time
      *
      * @param lookup the lookup
@@ -519,20 +510,6 @@ public enum CompilerConstants {
                 return method.invokestatic(className, name, descriptor);
             }
         };
-    }
-
-    /**
-     * Create a virtual call, looking up the method handle for it at the same time
-     *
-     * @param clazz  the class
-     * @param name   the name of the method
-     * @param rtype  the return type of the method
-     * @param ptypes the parameter types of the method
-     *
-     * @return the call object representing the virtual call
-     */
-    public static Call virtualCall(final Class<?> clazz, final String name, final Class<?> rtype, final Class<?>... ptypes) {
-        return virtualCall(MethodHandles.publicLookup(), clazz, name, rtype, ptypes);
     }
 
     /**

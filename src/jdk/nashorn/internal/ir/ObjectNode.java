@@ -27,42 +27,39 @@ package jdk.nashorn.internal.ir;
 
 import java.util.Collections;
 import java.util.List;
-
 import jdk.nashorn.internal.ir.annotations.Immutable;
 import jdk.nashorn.internal.ir.visitor.NodeVisitor;
-import jdk.nashorn.internal.runtime.Source;
 
 /**
  * IR representation of an object literal.
  */
 @Immutable
-public final class ObjectNode extends Node {
+public final class ObjectNode extends Expression {
 
     /** Literal elements. */
-    private final List<Node> elements;
+    private final List<PropertyNode> elements;
 
     /**
      * Constructor
      *
-     * @param source   the source
      * @param token    token
      * @param finish   finish
      * @param elements the elements used to initialize this ObjectNode
      */
-    public ObjectNode(final Source source, final long token, final int finish, final List<Node> elements) {
-        super(source, token, finish);
+    public ObjectNode(final long token, final int finish, final List<PropertyNode> elements) {
+        super(token, finish);
         this.elements = elements;
     }
 
-    private ObjectNode(final ObjectNode objectNode, final List<Node> elements) {
+    private ObjectNode(final ObjectNode objectNode, final List<PropertyNode> elements) {
         super(objectNode);
         this.elements = elements;
     }
 
     @Override
-    public Node accept(final NodeVisitor visitor) {
+    public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterObjectNode(this)) {
-            return visitor.leaveObjectNode(setElements(Node.accept(visitor, Node.class, elements)));
+            return visitor.leaveObjectNode(setElements(Node.accept(visitor, PropertyNode.class, elements)));
         }
 
         return this;
@@ -94,11 +91,11 @@ public final class ObjectNode extends Node {
      * Get the elements of this literal node
      * @return a list of elements
      */
-    public List<Node> getElements() {
+    public List<PropertyNode> getElements() {
         return Collections.unmodifiableList(elements);
     }
 
-    private ObjectNode setElements(final List<Node> elements) {
+    private ObjectNode setElements(final List<PropertyNode> elements) {
         if (this.elements == elements) {
             return this;
         }
