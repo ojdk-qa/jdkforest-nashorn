@@ -22,20 +22,37 @@
  */
 
 /**
- * JDK-8014647: Allow class-based overrides to be initialized with a ScriptFunction
+ * JDK-8028434: Check that the line number of the tests in while and do while loops
+ * is correct. It needs to correspond to the line with the test expression.
  *
  * @test
  * @run
  */
 
-var RunnableImpl1 = Java.extend(java.lang.Runnable, function() { print("I'm runnable 1!") })
-var RunnableImpl2 = Java.extend(java.lang.Runnable, function() { print("I'm runnable 2!") })
-var r1 = new RunnableImpl1()
-var r2 = new RunnableImpl2()
-var RunnableImpl3 = Java.extend(RunnableImpl2);
-var r3 = new RunnableImpl3({ run: function() { print("I'm runnable 3!") }})
-r1.run()
-r2.run()
-r3.run()
-print("r1.class !== r2.class: " + (r1.class !== r2.class))
-print("r2.class !== r3.class: " + (r2.class !== r3.class))
+try {
+    while (test.apa < 0) {
+	print("x");
+    }
+} catch (e) {
+    var st = e.getStackTrace();
+    if (st.length != 1) {
+	print("erroneous stacktrace length " + s.length);
+    }
+    if (st[0].lineNumber !== 33) {
+	print("erroneous stacktrace element, lineNumber=" + st[0].lineNumber + " elem=" + st);
+    }
+}
+
+try {
+    do {
+	print("x");
+    } while (test.apa < 0);
+} catch (e) {
+    var st = e.getStackTrace();
+    if (st.length != 1) {
+	print("erroneous stacktrace length " + s.length);
+    }
+    if (st[0].lineNumber !== 49) {
+	print("erroneous stacktrace element, lineNumber= " + st[0].lineNumber + " elem=" + st);
+    }
+}

@@ -22,20 +22,13 @@
  */
 
 /**
- * JDK-8014647: Allow class-based overrides to be initialized with a ScriptFunction
+ * JDK-8029467: Widening of booleans causes bad results
  *
  * @test
  * @run
  */
 
-var RunnableImpl1 = Java.extend(java.lang.Runnable, function() { print("I'm runnable 1!") })
-var RunnableImpl2 = Java.extend(java.lang.Runnable, function() { print("I'm runnable 2!") })
-var r1 = new RunnableImpl1()
-var r2 = new RunnableImpl2()
-var RunnableImpl3 = Java.extend(RunnableImpl2);
-var r3 = new RunnableImpl3({ run: function() { print("I'm runnable 3!") }})
-r1.run()
-r2.run()
-r3.run()
-print("r1.class !== r2.class: " + (r1.class !== r2.class))
-print("r2.class !== r3.class: " + (r2.class !== r3.class))
+print((function (x) { return x ? true : 0 })(true))
+print((function (x) { if(x) { return true } else { return 0 } })(true))
+print(typeof (function (x) { return x ? 1 : "123" })(true) === "number")
+print(typeof (function (x) { if(x) { return 1 } else { return "123" } })(true) === "number")
