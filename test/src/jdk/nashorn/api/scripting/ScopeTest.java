@@ -407,6 +407,75 @@ public class ScopeTest {
         Assert.assertEquals(e.eval(sharedScript, newCtxt), "newer context");
     }
 
+
+    /**
+     * Test multi-threaded access to prototype user accessor properties for shared script classes with multiple globals.
+     */
+    @Test
+    public static void multiThreadedAccessorTest() throws ScriptException, InterruptedException {
+        final ScriptEngineManager m = new ScriptEngineManager();
+        final ScriptEngine e = m.getEngineByName("nashorn");
+        final Bindings b = e.createBindings();
+        final ScriptContext origContext = e.getContext();
+        final ScriptContext newCtxt = new SimpleScriptContext();
+        newCtxt.setBindings(b, ScriptContext.ENGINE_SCOPE);
+
+        e.eval("Object.defineProperty(Object.prototype, 'foo', { get: function() 'original context' })", origContext);
+        e.eval("Object.defineProperty(Object.prototype, 'foo', { get: function() 'new context', configurable: true })", newCtxt);
+        final String sharedScript = "({}).foo";
+
+        final Thread t1 = new Thread(new ScriptRunner(e, origContext, sharedScript, "original context", 1000));
+        final Thread t2 = new Thread(new ScriptRunner(e, newCtxt, sharedScript, "new context", 1000));
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+
+        final Object obj3 = e.eval("delete Object.prototype.foo; Object.prototype.foo = 'newer context';", newCtxt);
+        assertEquals(obj3, "newer context");
+        final Thread t3 = new Thread(new ScriptRunner(e, origContext, sharedScript, "original context", 1000));
+        final Thread t4 = new Thread(new ScriptRunner(e, newCtxt, sharedScript, "newer context", 1000));
+
+        t3.start();
+        t4.start();
+        t3.join();
+        t4.join();
+    }
+
+    /**
+     * Test multi-threaded access to primitive prototype user accessor properties for shared script classes with multiple globals.
+     */
+    @Test
+    public static void multiThreadedPrimitiveAccessorTest() throws ScriptException, InterruptedException {
+        final ScriptEngineManager m = new ScriptEngineManager();
+        final ScriptEngine e = m.getEngineByName("nashorn");
+        final Bindings b = e.createBindings();
+        final ScriptContext origContext = e.getContext();
+        final ScriptContext newCtxt = new SimpleScriptContext();
+        newCtxt.setBindings(b, ScriptContext.ENGINE_SCOPE);
+
+        e.eval("Object.defineProperty(String.prototype, 'foo', { get: function() 'original context' })", origContext);
+        e.eval("Object.defineProperty(String.prototype, 'foo', { get: function() 'new context' })", newCtxt);
+        final String sharedScript = "''.foo";
+
+        final Thread t1 = new Thread(new ScriptRunner(e, origContext, sharedScript, "original context", 1000));
+        final Thread t2 = new Thread(new ScriptRunner(e, newCtxt, sharedScript, "new context", 1000));
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+
+        final Object obj3 = e.eval("delete String.prototype.foo; Object.prototype.foo = 'newer context';", newCtxt);
+        assertEquals(obj3, "newer context");
+        final Thread t3 = new Thread(new ScriptRunner(e, origContext, sharedScript, "original context", 1000));
+        final Thread t4 = new Thread(new ScriptRunner(e, newCtxt, sharedScript, "newer context", 1000));
+
+        t3.start();
+        t4.start();
+        t3.join();
+        t4.join();
+    }
+
     /**
      * Test multi-threaded scope function invocation for shared script classes with multiple globals.
      */
@@ -511,6 +580,60 @@ public class ScopeTest {
         assertEquals(e.eval(sharedScript, newCtxt), 2);
         assertEquals(e.eval("x"), 1);
         assertEquals(e.eval("x", newCtxt), 2);
+    }
+
+    // @bug 8058422: Users should be able to overwrite "context" and "engine" variables
+    @Test
+    public static void contextOverwriteTest() throws ScriptException {
+        final ScriptEngineManager m = new ScriptEngineManager();
+        final ScriptEngine e = m.getEngineByName("nashorn");
+        final Bindings b = new SimpleBindings();
+        b.put("context", "hello");
+        b.put("foo", 32);
+        final ScriptContext newCtxt = new SimpleScriptContext();
+        newCtxt.setBindings(b, ScriptContext.ENGINE_SCOPE);
+        e.setContext(newCtxt);
+        assertEquals(e.eval("context"), "hello");
+        assertEquals(((Number)e.eval("foo")).intValue(), 32);
+    }
+
+    // @bug 8058422: Users should be able to overwrite "context" and "engine" variables
+    @Test
+    public static void contextOverwriteInScriptTest() throws ScriptException {
+        final ScriptEngineManager m = new ScriptEngineManager();
+        final ScriptEngine e = m.getEngineByName("nashorn");
+        e.put("foo", 32);
+
+        assertEquals(((Number)e.eval("foo")).intValue(), 32);
+        assertEquals(e.eval("context = 'bar'"), "bar");
+        assertEquals(((Number)e.eval("foo")).intValue(), 32);
+    }
+
+    // @bug 8058422: Users should be able to overwrite "context" and "engine" variables
+    @Test
+    public static void engineOverwriteTest() throws ScriptException {
+        final ScriptEngineManager m = new ScriptEngineManager();
+        final ScriptEngine e = m.getEngineByName("nashorn");
+        final Bindings b = new SimpleBindings();
+        b.put("engine", "hello");
+        b.put("foo", 32);
+        final ScriptContext newCtxt = new SimpleScriptContext();
+        newCtxt.setBindings(b, ScriptContext.ENGINE_SCOPE);
+        e.setContext(newCtxt);
+        assertEquals(e.eval("engine"), "hello");
+        assertEquals(((Number)e.eval("foo")).intValue(), 32);
+    }
+
+    // @bug 8058422: Users should be able to overwrite "context" and "engine" variables
+    @Test
+    public static void engineOverwriteInScriptTest() throws ScriptException {
+        final ScriptEngineManager m = new ScriptEngineManager();
+        final ScriptEngine e = m.getEngineByName("nashorn");
+        e.put("foo", 32);
+
+        assertEquals(((Number)e.eval("foo")).intValue(), 32);
+        assertEquals(e.eval("engine = 'bar'"), "bar");
+        assertEquals(((Number)e.eval("foo")).intValue(), 32);
     }
 
     // @bug 8044750: megamorphic getter for scope objects does not call __noSuchProperty__ hook

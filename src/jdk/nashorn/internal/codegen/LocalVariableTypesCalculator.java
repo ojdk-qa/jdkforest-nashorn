@@ -551,13 +551,19 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
 
         final Expression init = forNode.getInit();
         if(forNode.isForIn()) {
-            forNode.getModify().accept(this);
-            enterTestFirstLoop(forNode, null, init);
+            final JoinPredecessorExpression iterable = forNode.getModify();
+            iterable.accept(this);
+            enterTestFirstLoop(forNode, null, init,
+                    // If we're iterating over property names, and we can discern from the runtime environment
+                    // of the compilation that the object being iterated over must use strings for property
+                    // names (e.g., it is a native JS object or array), then we'll not bother trying to treat
+                    // the property names optimistically.
+                    !compiler.useOptimisticTypes() || (!forNode.isForEach() && compiler.hasStringPropertyIterator(iterable.getExpression())));
         } else {
             if(init != null) {
                 init.accept(this);
             }
-            enterTestFirstLoop(forNode, forNode.getModify(), null);
+            enterTestFirstLoop(forNode, forNode.getModify(), null, false);
         }
         return false;
     }
@@ -680,6 +686,10 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
 
     @Override
     public boolean enterReturnNode(final ReturnNode returnNode) {
+        if(!reachable) {
+            return false;
+        }
+
         final Expression returnExpr = returnNode.getExpression();
         final Type returnExprType;
         if(returnExpr != null) {
@@ -695,6 +705,9 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
 
     @Override
     public boolean enterSplitNode(final SplitNode splitNode) {
+        if(!reachable) {
+            return false;
+        }
         // Need to visit inside of split nodes. While it's true that they don't have local variables, we need to visit
         // breaks, continues, and returns in them.
         if(topSplit == null) {
@@ -792,7 +805,8 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
         return false;
     }
 
-    private void enterTestFirstLoop(final LoopNode loopNode, final JoinPredecessorExpression modify, final Expression iteratorValues) {
+    private void enterTestFirstLoop(final LoopNode loopNode, final JoinPredecessorExpression modify,
+            final Expression iteratorValues, final boolean iteratorValuesAreObject) {
         final JoinPredecessorExpression test = loopNode.getTest();
         if(isAlwaysFalse(test)) {
             test.accept(this);
@@ -814,8 +828,12 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
                 jumpToLabel(test, breakLabel);
             }
             if(iteratorValues instanceof IdentNode) {
-                // Receives iterator values; they're currently all objects (JDK-8034954).
-                onAssignment((IdentNode)iteratorValues, LvarType.OBJECT);
+                final IdentNode ident = (IdentNode)iteratorValues;
+                // Receives iterator values; the optimistic type of the iterator values is tracked on the
+                // identifier, but we override optimism if it's known that the object being iterated over will
+                // never have primitive property names.
+                onAssignment(ident, iteratorValuesAreObject ? LvarType.OBJECT :
+                    toLvarType(compiler.getOptimisticType(ident)));
             }
             final Block body = loopNode.getBody();
             body.accept(this);
@@ -939,6 +957,9 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
 
     @Override
     public boolean enterVarNode(final VarNode varNode) {
+        if (!reachable) {
+            return false;
+        }
         final Expression init = varNode.getInit();
         if(init != null) {
             init.accept(this);
@@ -955,7 +976,7 @@ final class LocalVariableTypesCalculator extends NodeVisitor<LexicalContext>{
         if(whileNode.isDoWhile()) {
             enterDoWhileLoop(whileNode);
         } else {
-            enterTestFirstLoop(whileNode, null, null);
+            enterTestFirstLoop(whileNode, null, null, false);
         }
         return false;
     }

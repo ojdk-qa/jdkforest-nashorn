@@ -29,6 +29,7 @@ import static jdk.nashorn.internal.codegen.CompilerConstants.CONSTANTS;
 import static jdk.nashorn.internal.codegen.CompilerConstants.CREATE_PROGRAM_FUNCTION;
 import static jdk.nashorn.internal.codegen.CompilerConstants.SOURCE;
 import static jdk.nashorn.internal.codegen.CompilerConstants.STRICT_MODE;
+import static jdk.nashorn.internal.runtime.CodeStore.newCodeStore;
 import static jdk.nashorn.internal.runtime.ECMAErrors.typeError;
 import static jdk.nashorn.internal.runtime.ScriptRuntime.UNDEFINED;
 import static jdk.nashorn.internal.runtime.Source.sourceFor;
@@ -196,23 +197,18 @@ public final class Context {
         }
 
         @Override
-        public long getUniqueEvalId() {
-            return context.getUniqueEvalId();
-        }
-
-        @Override
-        public void storeScript(final String classInfoFile, final Source source, final String mainClassName,
+        public void storeScript(final String cacheKey, final Source source, final String mainClassName,
                                 final Map<String,byte[]> classBytes, final Map<Integer, FunctionInitializer> initializers,
                                 final Object[] constants, final int compilationId) {
             if (context.codeStore != null) {
-                context.codeStore.storeScript(classInfoFile, source, mainClassName, classBytes, initializers, constants, compilationId);
+                context.codeStore.store(cacheKey, source, mainClassName, classBytes, initializers, constants, compilationId);
             }
         }
 
         @Override
         public StoredScript loadScript(final Source source, final String functionKey) {
             if (context.codeStore != null) {
-                return context.codeStore.loadScript(source, functionKey);
+                return context.codeStore.load(source, functionKey);
             }
             return null;
         }
@@ -334,9 +330,6 @@ public final class Context {
     /** Unique id for script. Used only when --loader-per-compile=false */
     private final AtomicLong uniqueScriptId;
 
-    /** Unique id for 'eval' */
-    private final AtomicLong uniqueEvalId;
-
     /** Optional class filter to use for Java classes. Can be null. */
     private final ClassFilter classFilter;
 
@@ -450,7 +443,6 @@ public final class Context {
             this.uniqueScriptId = new AtomicLong();
         }
         this.errors    = errors;
-        this.uniqueEvalId = new AtomicLong();
 
         // if user passed -classpath option, make a class loader with that and set it as
         // thread context class loader so that script can access classes from that path.
@@ -472,8 +464,7 @@ public final class Context {
 
         if (env._persistent_cache) {
             try {
-                final String cacheDir = Options.getStringProperty("nashorn.persistent.code.cache", "nashorn_code_cache");
-                codeStore = new CodeStore(this, cacheDir);
+                codeStore = newCodeStore(this);
             } catch (final IOException e) {
                 throw new RuntimeException("Error initializing code cache", e);
             }
@@ -1126,13 +1117,13 @@ public final class Context {
         final String cacheKey = useCodeStore ? CodeStore.getCacheKey(0, null) : null;
 
         if (useCodeStore) {
-            storedScript = codeStore.loadScript(source, cacheKey);
+            storedScript = codeStore.load(source, cacheKey);
         }
 
         if (storedScript == null) {
             functionNode = new Parser(env, source, errMan, strict, getLogger(Parser.class)).parse();
 
-            if (errors.hasErrors()) {
+            if (errMan.hasErrors()) {
                 return null;
             }
 
@@ -1162,9 +1153,13 @@ public final class Context {
                     env,
                     installer,
                     source,
+                    errMan,
                     strict | functionNode.isStrict());
 
             final FunctionNode compiledFunction = compiler.compile(functionNode, phases);
+            if (errMan.hasErrors()) {
+                return null;
+            }
             script = compiledFunction.getRootClass();
             compiler.persistClassInfo(cacheKey, compiledFunction);
         } else {
@@ -1186,10 +1181,6 @@ public final class Context {
              }, CREATE_LOADER_ACC_CTXT);
     }
 
-    private long getUniqueEvalId() {
-        return uniqueEvalId.getAndIncrement();
-    }
-
     private long getUniqueScriptId() {
         return uniqueScriptId.getAndIncrement();
     }
@@ -1203,15 +1194,16 @@ public final class Context {
     private static Class<?> install(final StoredScript storedScript, final Source source, final CodeInstaller<ScriptEnvironment> installer) {
 
         final Map<String, Class<?>> installedClasses = new HashMap<>();
+        final Map<String, byte[]>   classBytes       = storedScript.getClassBytes();
         final Object[] constants       = storedScript.getConstants();
         final String   mainClassName   = storedScript.getMainClassName();
-        final byte[]   mainClassBytes  = storedScript.getClassBytes().get(mainClassName);
+        final byte[]   mainClassBytes  = classBytes.get(mainClassName);
         final Class<?> mainClass       = installer.install(mainClassName, mainClassBytes);
         final Map<Integer, FunctionInitializer> initialzers = storedScript.getInitializers();
 
         installedClasses.put(mainClassName, mainClass);
 
-        for (final Map.Entry<String, byte[]> entry : storedScript.getClassBytes().entrySet()) {
+        for (final Map.Entry<String, byte[]> entry : classBytes.entrySet()) {
             final String className = entry.getKey();
             if (className.equals(mainClassName)) {
                 continue;
