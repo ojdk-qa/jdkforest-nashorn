@@ -119,7 +119,17 @@ public final class NativeUint8Array extends ArrayBufferView {
         }
 
         @Override
+        public Class<?> getElementType() {
+            return int.class;
+        }
+
+        @Override
         public int getInt(final int index) {
+            return getElem(index);
+        }
+
+        @Override
+        public int getIntOptimistic(final int index, final int programPoint) {
             return getElem(index);
         }
 
@@ -129,8 +139,18 @@ public final class NativeUint8Array extends ArrayBufferView {
         }
 
         @Override
+        public long getLongOptimistic(final int index, final int programPoint) {
+            return getElem(index);
+        }
+
+        @Override
         public double getDouble(final int index) {
             return getInt(index);
+        }
+
+        @Override
+        public double getDoubleOptimistic(final int index, final int programPoint) {
+            return getElem(index);
         }
 
         @Override

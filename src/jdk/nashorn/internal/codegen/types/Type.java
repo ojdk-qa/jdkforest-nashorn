@@ -51,12 +51,15 @@ import static jdk.nashorn.internal.codegen.CompilerConstants.staticCallNoLookup;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.io.Serializable;
 import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.Collections;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import jdk.internal.org.objectweb.asm.Handle;
@@ -87,22 +90,33 @@ import jdk.nashorn.internal.runtime.linker.Bootstrap;
  * INTs rather than OBJECTs
  */
 
-public abstract class Type implements Comparable<Type>, BytecodeOps {
+public abstract class Type implements Comparable<Type>, BytecodeOps, Serializable {
+    private static final long serialVersionUID = 1L;
 
     /** Human readable name for type */
-    private final String name;
+    private transient final String name;
 
     /** Descriptor for type */
-    private final String descriptor;
+    private transient final String descriptor;
 
     /** The "weight" of the type. Used for picking widest/least specific common type */
-    private final int weight;
+    private transient final int weight;
 
     /** How many bytecode slots does this type occupy */
-    private final int slots;
+    private transient final int slots;
 
     /** The class for this type */
     private final Class<?> clazz;
+
+    /**
+     * Cache for internal types - this is a query that requires complex stringbuilding inside
+     * ASM and it saves startup time to cache the type mappings
+     */
+    private static final Map<Class<?>, jdk.internal.org.objectweb.asm.Type> INTERNAL_TYPE_CACHE =
+            Collections.synchronizedMap(new WeakHashMap<Class<?>, jdk.internal.org.objectweb.asm.Type>());
+
+    /** Internal ASM type for this Type - computed once at construction */
+    private transient final jdk.internal.org.objectweb.asm.Type internalType;
 
     /** Weights are used to decide which types are "wider" than other types */
     protected static final int MIN_WEIGHT = -1;
@@ -122,12 +136,13 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      * @param slots       how many bytecode slots the type takes up
      */
     Type(final String name, final Class<?> clazz, final int weight, final int slots) {
-        this.name       = name;
-        this.clazz      = clazz;
-        this.descriptor = jdk.internal.org.objectweb.asm.Type.getDescriptor(clazz);
-        this.weight     = weight;
+        this.name         = name;
+        this.clazz        = clazz;
+        this.descriptor   = jdk.internal.org.objectweb.asm.Type.getDescriptor(clazz);
+        this.weight       = weight;
         assert weight >= MIN_WEIGHT && weight <= MAX_WEIGHT : "illegal type weight: " + weight;
-        this.slots      = slots;
+        this.slots        = slots;
+        this.internalType = getInternalType(clazz);
     }
 
     /**
@@ -299,7 +314,7 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      *
      * @param typeMap the type map
      * @param output data output
-     * @throws IOException
+     * @throws IOException if write cannot be completed
      */
     public static void writeTypeMap(final Map<Integer, Type> typeMap, final DataOutput output) throws IOException {
         if (typeMap == null) {
@@ -329,7 +344,7 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      *
      * @param input data input
      * @return type map
-     * @throws IOException
+     * @throws IOException if read cannot be completed
      */
     public static Map<Integer, Type> readTypeMap(final DataInput input) throws IOException {
         final int size = input.readInt();
@@ -357,11 +372,22 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
     }
 
     private jdk.internal.org.objectweb.asm.Type getInternalType() {
-        return jdk.internal.org.objectweb.asm.Type.getType(getTypeClass());
+        return internalType;
+    }
+
+    private static jdk.internal.org.objectweb.asm.Type lookupInternalType(final Class<?> type) {
+        final Map<Class<?>, jdk.internal.org.objectweb.asm.Type> cache = INTERNAL_TYPE_CACHE;
+        jdk.internal.org.objectweb.asm.Type itype = cache.get(type);
+        if (itype != null) {
+            return itype;
+        }
+        itype = jdk.internal.org.objectweb.asm.Type.getType(type);
+        cache.put(type, itype);
+        return itype;
     }
 
     private static jdk.internal.org.objectweb.asm.Type getInternalType(final Class<?> type) {
-        return jdk.internal.org.objectweb.asm.Type.getType(type);
+        return lookupInternalType(type);
     }
 
     static void invokestatic(final MethodVisitor method, final Call call) {
@@ -911,6 +937,8 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      * This is the singleton for integer arrays
      */
     public static final ArrayType INT_ARRAY = new ArrayType(int[].class) {
+        private static final long serialVersionUID = 1L;
+
         @Override
         public void astore(final MethodVisitor method) {
             method.visitInsn(IASTORE);
@@ -938,6 +966,8 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      * This is the singleton for long arrays
      */
     public static final ArrayType LONG_ARRAY = new ArrayType(long[].class) {
+        private static final long serialVersionUID = 1L;
+
         @Override
         public void astore(final MethodVisitor method) {
             method.visitInsn(LASTORE);
@@ -965,6 +995,8 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      * This is the singleton for numeric arrays
      */
     public static final ArrayType NUMBER_ARRAY = new ArrayType(double[].class) {
+        private static final long serialVersionUID = 1L;
+
         @Override
         public void astore(final MethodVisitor method) {
             method.visitInsn(DASTORE);
@@ -999,6 +1031,8 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
 
     /** This type, always an object type, just a toString override */
     public static final Type THIS = new ObjectType() {
+        private static final long serialVersionUID = 1L;
+
         @Override
         public String toString() {
             return "this";
@@ -1007,6 +1041,8 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
 
     /** Scope type, always an object type, just a toString override */
     public static final Type SCOPE = new ObjectType() {
+        private static final long serialVersionUID = 1L;
+
         @Override
         public String toString() {
             return "scope";
@@ -1018,6 +1054,7 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
     }
 
     private abstract static class ValueLessType extends Type {
+        private static final long serialVersionUID = 1L;
 
         ValueLessType(final String name) {
             super(name, Unknown.class, MIN_WEIGHT, 1);
@@ -1069,6 +1106,8 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      * inference. It has the minimum type width
      */
     public static final Type UNKNOWN = new ValueLessType("<unknown>") {
+        private static final long serialVersionUID = 1L;
+
         @Override
         public String getDescriptor() {
             return "<unknown>";
@@ -1085,6 +1124,7 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
      * inference. It has the minimum type width
      */
     public static final Type SLOT_2 = new ValueLessType("<slot_2>") {
+        private static final long serialVersionUID = 1L;
 
         @Override
         public String getDescriptor() {
@@ -1100,5 +1140,9 @@ public abstract class Type implements Comparable<Type>, BytecodeOps {
     private static <T extends Type> T putInCache(final T type) {
         cache.put(type.getTypeClass(), type);
         return type;
+    }
+
+    protected final Object readResolve() {
+        return Type.typeFor(clazz);
     }
 }

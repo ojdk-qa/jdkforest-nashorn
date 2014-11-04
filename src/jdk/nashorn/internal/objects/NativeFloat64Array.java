@@ -94,6 +94,11 @@ public final class NativeFloat64Array extends ArrayBufferView {
             return SET_ELEM;
         }
 
+        @Override
+        public Class<?> getElementType() {
+            return double.class;
+        }
+
         private double getElem(final int index) {
             try {
                 return nb.get(index);
@@ -133,6 +138,11 @@ public final class NativeFloat64Array extends ArrayBufferView {
 
         @Override
         public double getDouble(final int index) {
+            return getElem(index);
+        }
+
+        @Override
+        public double getDoubleOptimistic(final int index, final int programPoint) {
             return getElem(index);
         }
 

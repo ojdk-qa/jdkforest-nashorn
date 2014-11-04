@@ -128,6 +128,11 @@ public final class NativeUint32Array extends ArrayBufferView {
         }
 
         @Override
+        public Class<?> getElementType() {
+            return long.class;
+        }
+
+        @Override
         public int getInt(final int index) {
             return (int)getLong(index);
         }
@@ -138,7 +143,17 @@ public final class NativeUint32Array extends ArrayBufferView {
         }
 
         @Override
+        public long getLongOptimistic(final int index, final int programPoint) {
+            return getElem(index);
+        }
+
+        @Override
         public double getDouble(final int index) {
+            return getLong(index);
+        }
+
+        @Override
+        public double getDoubleOptimistic(final int index, final int programPoint) {
             return getLong(index);
         }
 

@@ -31,7 +31,6 @@ import static jdk.nashorn.internal.lookup.Lookup.MH;
 import static jdk.nashorn.internal.runtime.UnwarrantedOptimismException.INVALID_PROGRAM_POINT;
 import static jdk.nashorn.internal.runtime.linker.NashornCallSiteDescriptor.getProgramPoint;
 import static jdk.nashorn.internal.runtime.logging.DebugLogger.quote;
-
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.SwitchPoint;
@@ -328,7 +327,9 @@ public final class GlobalConstants implements Loggable {
         }
 
         if (!acc.mayRetry()) {
-            log.info("*** SET: Giving up on " + quote(name) + " - retry count has exceeded " + DynamicLinker.getLinkedCallSiteLocation());
+            if (log.isEnabled()) {
+                log.fine("*** SET: Giving up on " + quote(name) + " - retry count has exceeded " + DynamicLinker.getLinkedCallSiteLocation());
+            }
             return null;
         }
 
@@ -358,8 +359,12 @@ public final class GlobalConstants implements Loggable {
      * @param c constant value
      * @return method handle (with dummy receiver) that returns this constant
      */
+    public static MethodHandle staticConstantGetter(final Object c) {
+        return MH.dropArguments(JSType.unboxConstant(c), 0, Object.class);
+    }
+
     private MethodHandle constantGetter(final Object c) {
-        final MethodHandle mh = MH.dropArguments(JSType.unboxConstant(c), 0, Object.class);
+        final MethodHandle mh = staticConstantGetter(c);
         if (log.isEnabled()) {
             return MethodHandleFactory.addDebugPrintout(log, Level.FINEST, mh, "getting as constant");
         }
@@ -400,7 +405,9 @@ public final class GlobalConstants implements Loggable {
         }
 
         if (acc.hasBeenInvalidated() || acc.guardFailed()) {
-            log.fine("*** GET: Giving up on " + quote(name) + " - retry count has exceeded");
+            if (log.isEnabled()) {
+                log.info("*** GET: Giving up on " + quote(name) + " - retry count has exceeded " + DynamicLinker.getLinkedCallSiteLocation());
+            }
             return null;
         }
 

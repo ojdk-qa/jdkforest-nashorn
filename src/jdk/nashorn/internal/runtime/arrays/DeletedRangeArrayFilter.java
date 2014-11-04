@@ -45,7 +45,7 @@ final class DeletedRangeArrayFilter extends ArrayFilter {
         if(hi < SparseArrayData.MAX_DENSE_LENGTH || underlying instanceof SparseArrayData) {
             return underlying;
         }
-        return new SparseArrayData(underlying, underlying.length());
+        return new SparseArrayData(underlying, underlying.length);
     }
 
     private boolean isEmpty() {
@@ -66,9 +66,9 @@ final class DeletedRangeArrayFilter extends ArrayFilter {
     public Object[] asObjectArray() {
         final Object[] value = super.asObjectArray();
 
-        if (lo <= Integer.MAX_VALUE) {
-            final int intHi = (int)Math.min(hi, Integer.MAX_VALUE);
-            for (int i = (int)lo; i <= intHi; i++) {
+        if (lo < Integer.MAX_VALUE) {
+            final int end = (int)Math.min(hi + 1, Integer.MAX_VALUE);
+            for (int i = (int)lo; i < end; i++) {
                 value[i] = ScriptRuntime.UNDEFINED;
             }
         }
@@ -81,9 +81,9 @@ final class DeletedRangeArrayFilter extends ArrayFilter {
         final Object value = super.asArrayOfType(componentType);
         final Object undefValue = convertUndefinedValue(componentType);
 
-        if (lo <= Integer.MAX_VALUE) {
-            final int intHi = (int)Math.min(hi, Integer.MAX_VALUE);
-            for (int i = (int)lo; i <= intHi; i++) {
+        if (lo < Integer.MAX_VALUE) {
+            final int end = (int)Math.min(hi + 1, Integer.MAX_VALUE);
+            for (int i = (int)lo; i < end; i++) {
                 Array.set(value, i, undefValue);
             }
         }
@@ -93,7 +93,7 @@ final class DeletedRangeArrayFilter extends ArrayFilter {
 
     @Override
     public ArrayData ensure(final long safeIndex) {
-        if (safeIndex >= SparseArrayData.MAX_DENSE_LENGTH && safeIndex >= length()) {
+        if (safeIndex >= SparseArrayData.MAX_DENSE_LENGTH && safeIndex >= length) {
             return new SparseArrayData(this, safeIndex + 1);
         }
 
@@ -110,8 +110,9 @@ final class DeletedRangeArrayFilter extends ArrayFilter {
     @Override
     public ArrayData shiftRight(final int by) {
         super.shiftRight(by);
-        lo = Math.min(length(), lo + by);
-        hi = Math.min(length() - 1, hi + by);
+        final long len = length;
+        lo = Math.min(len, lo + by);
+        hi = Math.min(len - 1, hi + by);
 
         return isEmpty() ? getUnderlying() : this;
     }
@@ -237,7 +238,7 @@ final class DeletedRangeArrayFilter extends ArrayFilter {
 
     @Override
     public Object pop() {
-        final int index = (int)(length() - 1);
+        final int index = (int)length - 1;
         if (super.has(index)) {
             final boolean isDeleted = isDeleted(index);
             final Object value      = super.pop();

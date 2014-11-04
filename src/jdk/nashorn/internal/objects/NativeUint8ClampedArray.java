@@ -98,6 +98,11 @@ public final class NativeUint8ClampedArray extends ArrayBufferView {
             return SET_ELEM;
         }
 
+        @Override
+        public Class<?> getElementType() {
+            return int.class;
+        }
+
         private int getElem(final int index) {
             try {
                 return nb.get(index) & 0xff;
@@ -154,13 +159,28 @@ public final class NativeUint8ClampedArray extends ArrayBufferView {
         }
 
         @Override
+        public int getIntOptimistic(final int index, final int programPoint) {
+            return getElem(index);
+        }
+
+        @Override
         public long getLong(final int index) {
             return getInt(index);
         }
 
         @Override
+        public long getLongOptimistic(final int index, final int programPoint) {
+            return getElem(index);
+        }
+
+        @Override
         public double getDouble(final int index) {
             return getInt(index);
+        }
+
+        @Override
+        public double getDoubleOptimistic(final int index, final int programPoint) {
+            return getElem(index);
         }
 
         @Override

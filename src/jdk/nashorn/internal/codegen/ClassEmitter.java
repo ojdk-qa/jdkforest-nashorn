@@ -56,16 +56,15 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintWriter;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Set;
-
 import jdk.internal.org.objectweb.asm.ClassWriter;
 import jdk.internal.org.objectweb.asm.MethodVisitor;
 import jdk.internal.org.objectweb.asm.util.TraceClassVisitor;
 import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.ir.FunctionNode;
-import jdk.nashorn.internal.ir.SplitNode;
 import jdk.nashorn.internal.ir.debug.NashornClassReader;
 import jdk.nashorn.internal.ir.debug.NashornTextifier;
 import jdk.nashorn.internal.runtime.Context;
@@ -160,8 +159,12 @@ public class ClassEmitter implements Emitter {
         this.methodNames    = new HashSet<>();
     }
 
+    /**
+     * Return the method names encountered
+     * @return method names
+     */
     public Set<String> getMethodNames() {
-        return methodNames;
+        return Collections.unmodifiableSet(methodNames);
     }
 
     /**
@@ -471,12 +474,6 @@ public class ClassEmitter implements Emitter {
     void endMethod(final MethodEmitter method) {
         assert methodsStarted.contains(method);
         methodsStarted.remove(method);
-    }
-
-    SplitMethodEmitter method(final SplitNode splitNode, final String methodName, final Class<?> rtype, final Class<?>... ptypes) {
-        methodCount++;
-        methodNames.add(methodName);
-        return new SplitMethodEmitter(this, methodVisitor(EnumSet.of(Flag.PUBLIC, Flag.STATIC), methodName, rtype, ptypes), splitNode);
     }
 
     /**

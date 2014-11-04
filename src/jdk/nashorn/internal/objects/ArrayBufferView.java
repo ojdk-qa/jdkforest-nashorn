@@ -45,7 +45,7 @@ import jdk.nashorn.internal.runtime.arrays.ArrayData;
 import jdk.nashorn.internal.runtime.arrays.TypedArrayData;
 
 @ScriptClass("ArrayBufferView")
-abstract class ArrayBufferView extends ScriptObject {
+public abstract class ArrayBufferView extends ScriptObject {
     private final NativeArrayBuffer buffer;
     private final int byteOffset;
 

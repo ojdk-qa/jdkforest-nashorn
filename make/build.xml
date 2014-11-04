@@ -49,8 +49,6 @@
     <condition property="git.executable" value="/usr/local/bin/git" else="git">
       <available file="/usr/local/bin/git"/>
     </condition>
-    <!-- check if JDK already has ASM classes -->
-    <available property="asm.available" classname="jdk.internal.org.objectweb.asm.Type"/>
     <!-- check if testng.jar is avaiable -->
     <available property="testng.available" file="${file.reference.testng.jar}"/>
     <!-- check if Jemmy ang testng.jar are avaiable -->
@@ -79,7 +77,30 @@
     </condition>
   </target>
 
-  <target name="init" depends="init-conditions, init-cc">
+  <!-- check minimum ant version required to be 1.8.4 -->
+  <target name="check-ant-version">
+    <property name="ant.version.required" value="1.8.4"/>
+    <antversion property="ant.current.version" />
+    <fail message="The current ant version, ${ant.current.version}, is too old. Please use 1.8.4 or above.">
+        <condition>
+            <not>
+                <antversion atleast="${ant.version.required}"/>
+            </not>
+        </condition>
+    </fail>
+  </target>
+
+  <target name="check-java-version">
+    <!-- look for a Class that is available only in jdk1.8 or above -->
+    <!-- core/exposed API class is better than an implementation class -->
+    <available property="jdk1.8+" classname="java.util.stream.Stream"/>
+
+    <!-- need jdk1.8 or above -->
+    <fail message="Unsupported Java version: ${ant.java.version}. Please use Java version 1.8 or greater." unless="jdk1.8+">
+    </fail>
+  </target>
+  
+  <target name="init" depends="check-ant-version, check-java-version, init-conditions, init-cc">
     <!-- extends jvm args -->
     <property name="run.test.jvmargs" value="${run.test.jvmargs.main} ${run.test.cc.jvmargs} ${jfr.options}"/>
     <property name="run.test.jvmargs.octane" value="${run.test.jvmargs.octane.main} ${run.test.cc.jvmargs} ${jfr.options}"/>
@@ -107,19 +128,7 @@
     <delete dir="${dist.dir}"/>
   </target>
 
-  <!-- do it only if ASM is not available -->
-  <target name="compile-asm" depends="prepare" unless="asm.available">
-    <javac srcdir="${jdk.asm.src.dir}"
-           destdir="${build.classes.dir}"
-           excludes="**/optimizer/* **/xml/* **/attrs/*"
-           source="${javac.source}"
-           target="${javac.target}"
-           debug="${javac.debug}"
-           encoding="${javac.encoding}"
-           includeantruntime="false"/>
-  </target>
-
-  <target name="compile" depends="compile-asm" description="Compiles nashorn">
+  <target name="compile" depends="prepare" description="Compiles nashorn">
     <javac srcdir="${src.dir}"
            destdir="${build.classes.dir}"
            classpath="${javac.classpath}"
@@ -407,7 +416,7 @@ grant codeBase "file:/${basedir}/test/script/markdown.js" {
     <fileset id="test.nosecurity.classes" dir="${build.test.classes.dir}">
       <include name="**/framework/ScriptTest.class"/>
     </fileset>
-    <testng outputdir="${build.nosecurity.test.results.dir}" classfilesetref="test.nosecurity.classes"
+    <testng outputdir="${build.nosecurity.test.results.dir}/${testResultsSubDir}" classfilesetref="test.nosecurity.classes"
        verbose="${testng.verbose}" haltonfailure="true" useDefaultListeners="false" listeners="${testng.listeners}" workingDir="${basedir}">
       <jvmarg line="${ext.class.path}"/>
       <jvmarg line="${run.test.jvmargs} -Xmx${run.test.xmx} -Dbuild.dir=${build.dir}"/>
@@ -419,6 +428,7 @@ grant codeBase "file:/${basedir}/test/script/markdown.js" {
         <propertyref prefix="test-sys-prop-no-security."/>
         <mapper from="test-sys-prop-no-security.*" to="*" type="glob"/>
       </propertyset>
+      <sysproperty key="optimistic.override" value="${optimistic}"/>
       <classpath>
           <pathelement path="${run.test.classpath}"/>
       </classpath>
@@ -429,8 +439,8 @@ grant codeBase "file:/${basedir}/test/script/markdown.js" {
   <target name="-test-security">
     <delete dir="${build.dir}/nashorn_code_cache"/>
     <property name="debug.test.jvmargs" value=""/>
-    <testng outputdir="${build.test.results.dir}" classfilesetref="test.classes"
-       verbose="${testng.verbose}" haltonfailure="true" useDefaultListeners="false" listeners="${testng.listeners}" workingDir="${basedir}">
+    <testng outputdir="${build.test.results.dir}/${testResultsSubDir}" classfilesetref="test.classes"
+	    verbose="${testng.verbose}" haltonfailure="true" useDefaultListeners="false" listeners="${testng.listeners}" workingDir="${basedir}">
       <jvmarg line="${ext.class.path}"/>
       <jvmarg line="${run.test.jvmargs} -Xmx${run.test.xmx} ${run.test.jvmsecurityargs} -Dbuild.dir=${build.dir}"/>
       <jvmarg line="${debug.test.jvmargs}"/>
@@ -441,6 +451,7 @@ grant codeBase "file:/${basedir}/test/script/markdown.js" {
         <propertyref prefix="test-sys-prop."/>
         <mapper from="test-sys-prop.*" to="*" type="glob"/>
       </propertyset>
+      <sysproperty key="optimistic.override" value="${optimistic}"/>
       <sysproperty key="test.js.excludes.file" value="${exclude.list}"/>
       <classpath>
           <pathelement path="${run.test.classpath}"/>
@@ -448,7 +459,31 @@ grant codeBase "file:/${basedir}/test/script/markdown.js" {
     </testng>
   </target>
 
-  <target name="test" depends="jar, -test-classes-all,-test-classes-single, check-testng, check-external-tests, compile-test, generate-policy-file, -test-security, -test-nosecurity" if="testng.available"/>
+  <target name="test" depends="test-pessimistic, test-optimistic"/>
+
+  <target name="test-optimistic" depends="jar, -test-classes-all,-test-classes-single, check-testng, check-external-tests, compile-test, generate-policy-file" if="testng.available">
+    <echo message="Running test suite in OPTIMISTIC mode..."/>
+    <antcall target="-test-nosecurity" inheritRefs="true">
+      <param name="optimistic" value="true"/>
+      <param name="testResultsSubDir" value="optimistic"/>
+    </antcall>    
+    <antcall target="-test-security" inheritRefs="true">
+      <param name="optimistic" value="true"/>
+      <param name="testResultsSubDir" value="optimistic"/>
+    </antcall>
+  </target>
+
+  <target name="test-pessimistic" depends="jar, -test-classes-all,-test-classes-single, check-testng, check-external-tests, compile-test, generate-policy-file" if="testng.available">
+    <echo message="Running test suite in PESSIMISTIC mode..."/>
+    <antcall target="-test-nosecurity" inheritRefs="true">
+      <param name="optimistic" value="false"/>
+      <param name="testResultsSubDir" value="pessimistic"/>
+    </antcall>    
+    <antcall target="-test-security" inheritRefs="true">
+      <param name="optimistic" value="false"/>
+      <param name="testResultsSubDir" value="pessimistic"/>
+    </antcall>
+  </target>
 
   <target name="check-jemmy.jfx.testng" unless="jemmy.jfx.testng.available">
     <echo message="WARNING: Jemmy or JavaFX or TestNG not available, will not run tests. Please copy testng.jar, JemmyCore.jar, JemmyFX.jar, JemmyAWTInput.jar under test${file.separator}lib directory. And make sure you have jfxrt.jar in ${java.home}${file.separator}lib${file.separator}ext dir."/>

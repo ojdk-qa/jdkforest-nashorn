@@ -38,6 +38,7 @@ import java.lang.invoke.SwitchPoint;
 import jdk.internal.dynalink.CallSiteDescriptor;
 import jdk.internal.dynalink.linker.GuardedInvocation;
 import jdk.internal.dynalink.linker.LinkRequest;
+import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.lookup.Lookup;
 import jdk.nashorn.internal.runtime.ScriptObject;
 import jdk.nashorn.internal.runtime.linker.NashornCallSiteDescriptor;
@@ -77,11 +78,11 @@ public abstract class ContinuousArrayData extends ArrayData {
      * array without reallocating, or if we are overwriting an already
      * allocated element
      *
-     * @param index
+     * @param index index to check
      * @return true if we don't need to do any array reallocation to fit an element at index
      */
     public final boolean hasRoomFor(final int index) {
-        return has(index) || (index == length() && ensure(index) == this);
+        return has(index) || (index == length && ensure(index) == this);
     }
 
     /**
@@ -113,6 +114,17 @@ public abstract class ContinuousArrayData extends ArrayData {
             throw new ClassCastException();
         }
         return index;
+    }
+
+    /**
+     * Returns the type used to store an element in this array
+     * @return element type
+     */
+    public abstract Class<?> getElementType();
+
+    @Override
+    public Type getOptimisticType() {
+        return Type.typeFor(getElementType());
     }
 
     /**
@@ -173,11 +185,6 @@ public abstract class ContinuousArrayData extends ArrayData {
      */
     protected MethodHandle getContinuousElementSetter(final Class<? extends ContinuousArrayData> clazz, final MethodHandle setHas, final Class<?> elementType) {
         return MH.asType(setHas, setHas.type().changeParameterType(2, elementType).changeParameterType(0, clazz));
-    }
-
-    @Override
-    public GuardedInvocation findFastGetMethod(final Class<? extends ArrayData> clazz, final CallSiteDescriptor desc, final LinkRequest request, final String operator) {
-        return null;
     }
 
     /** Fast access guard - it is impractical for JIT performance reasons to use only CCE asType as guard :-(, also we need
@@ -268,5 +275,73 @@ public abstract class ContinuousArrayData extends ArrayData {
         }
 
         return null;
+    }
+
+    /**
+     * Specialization - fast push implementation
+     * @param arg argument
+     * @return new array length
+     */
+    public long fastPush(final int arg) {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast push implementation
+     * @param arg argument
+     * @return new array length
+     */
+    public long fastPush(final long arg) {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast push implementation
+     * @param arg argument
+     * @return new array length
+     */
+    public long fastPush(final double arg) {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast push implementation
+     * @param arg argument
+     * @return new array length
+     */
+    public long fastPush(final Object arg) {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast pop implementation
+     * @return element value
+     */
+    public int fastPopInt() {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast pop implementation
+     * @return element value
+     */
+    public long fastPopLong() {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast pop implementation
+     * @return element value
+     */
+    public double fastPopDouble() {
+       throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
+    }
+
+    /**
+     * Specialization - fast pop implementation
+     * @return element value
+     */
+    public Object fastPopObject() {
+        throw new ClassCastException(String.valueOf(getClass())); //type is wrong, relink
     }
 }

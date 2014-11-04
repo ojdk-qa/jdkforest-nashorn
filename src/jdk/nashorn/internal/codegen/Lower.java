@@ -52,6 +52,7 @@ import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.FunctionNode.CompilationState;
 import jdk.nashorn.internal.ir.IdentNode;
 import jdk.nashorn.internal.ir.IfNode;
+import jdk.nashorn.internal.ir.JumpStatement;
 import jdk.nashorn.internal.ir.LabelNode;
 import jdk.nashorn.internal.ir.LexicalContext;
 import jdk.nashorn.internal.ir.LiteralNode;
@@ -351,8 +352,6 @@ final class Lower extends NodeOperatorVisitor<BlockLexicalContext> implements Lo
     private Node spliceFinally(final TryNode tryNode, final List<ThrowNode> rethrows, final Block finallyBody) {
         assert tryNode.getFinallyBody() == null;
 
-        final LexicalContext lowerLc = lc;
-
         final TryNode newTryNode = (TryNode)tryNode.accept(new NodeVisitor<LexicalContext>(new LexicalContext()) {
             final List<Node> insideTry = new ArrayList<>();
 
@@ -382,12 +381,16 @@ final class Lower extends NodeOperatorVisitor<BlockLexicalContext> implements Lo
 
             @Override
             public Node leaveBreakNode(final BreakNode breakNode) {
-                return copy(breakNode, (Node)Lower.this.lc.getBreakable(breakNode.getLabelName()));
+                return leaveJumpStatement(breakNode);
             }
 
             @Override
             public Node leaveContinueNode(final ContinueNode continueNode) {
-                return copy(continueNode, Lower.this.lc.getContinueTo(continueNode.getLabelName()));
+                return leaveJumpStatement(continueNode);
+            }
+
+            private Node leaveJumpStatement(final JumpStatement jump) {
+                return copy(jump, (Node)jump.getTarget(Lower.this.lc));
             }
 
             @Override
@@ -401,7 +404,6 @@ final class Lower extends NodeOperatorVisitor<BlockLexicalContext> implements Lo
                     //still in the try block, store it in a result value and return it afterwards
                     resultNode = new IdentNode(Lower.this.compilerConstant(RETURN));
                     newStatements.add(new ExpressionStatement(returnNode.getLineNumber(), returnNode.getToken(), returnNode.getFinish(), new BinaryNode(Token.recast(returnNode.getToken(), TokenType.ASSIGN), resultNode, expr)));
-                    lowerLc.setFlag(lowerLc.getCurrentFunction(), FunctionNode.USES_RETURN_SYMBOL);
                 } else {
                     resultNode = null;
                 }
@@ -627,7 +629,7 @@ final class Lower extends NodeOperatorVisitor<BlockLexicalContext> implements Lo
             @Override
             public Node leaveContinueNode(final ContinueNode node) {
                 // all inner loops have been popped.
-                if (lex.contains(lex.getContinueTo(node.getLabelName()))) {
+                if (lex.contains(node.getTarget(lex))) {
                     escapes.add(node);
                 }
                 return node;

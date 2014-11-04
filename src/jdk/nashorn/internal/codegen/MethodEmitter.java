@@ -89,23 +89,24 @@ import jdk.nashorn.internal.codegen.types.ArrayType;
 import jdk.nashorn.internal.codegen.types.BitwiseType;
 import jdk.nashorn.internal.codegen.types.NumericType;
 import jdk.nashorn.internal.codegen.types.Type;
-import jdk.nashorn.internal.ir.BreakableNode;
 import jdk.nashorn.internal.ir.FunctionNode;
 import jdk.nashorn.internal.ir.IdentNode;
 import jdk.nashorn.internal.ir.JoinPredecessor;
-import jdk.nashorn.internal.ir.LexicalContext;
 import jdk.nashorn.internal.ir.LiteralNode;
 import jdk.nashorn.internal.ir.LocalVariableConversion;
 import jdk.nashorn.internal.ir.RuntimeNode;
 import jdk.nashorn.internal.ir.Symbol;
 import jdk.nashorn.internal.ir.TryNode;
 import jdk.nashorn.internal.objects.Global;
+import jdk.nashorn.internal.objects.NativeArray;
 import jdk.nashorn.internal.runtime.ArgumentSetter;
 import jdk.nashorn.internal.runtime.Context;
 import jdk.nashorn.internal.runtime.Debug;
 import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.RewriteException;
+import jdk.nashorn.internal.runtime.Scope;
 import jdk.nashorn.internal.runtime.ScriptObject;
+import jdk.nashorn.internal.runtime.ScriptRuntime;
 import jdk.nashorn.internal.runtime.UnwarrantedOptimismException;
 import jdk.nashorn.internal.runtime.linker.Bootstrap;
 import jdk.nashorn.internal.runtime.logging.DebugLogger;
@@ -179,9 +180,6 @@ public class MethodEmitter implements Emitter {
 
     /** Bootstrap for array populators */
     private static final Handle POPULATE_ARRAY_BOOTSTRAP = new Handle(H_INVOKESTATIC, RewriteException.BOOTSTRAP.className(), RewriteException.BOOTSTRAP.name(), RewriteException.BOOTSTRAP.descriptor());
-
-    /** Bootstrap for global name invalidation */
-    private static final Handle INVALIDATE_NAME_BOOTSTRAP = new Handle(H_INVOKESTATIC, Global.BOOTSTRAP.className(), Global.BOOTSTRAP.name(), Global.BOOTSTRAP.descriptor());
 
     /**
      * Constructor - internal use from ClassEmitter only
@@ -1050,6 +1048,14 @@ public class MethodEmitter implements Emitter {
         return load(getCompilerConstantSymbol(cc), type != null ? type : getCompilerConstantType(cc));
     }
 
+    MethodEmitter loadScope() {
+        return loadCompilerConstant(SCOPE).checkcast(Scope.class);
+    }
+
+    MethodEmitter setSplitState(final int state) {
+        return loadScope().load(state).invoke(Scope.SET_SPLIT_STATE);
+    }
+
     void storeCompilerConstant(final CompilerConstants cc) {
         storeCompilerConstant(cc, null);
     }
@@ -1657,19 +1663,6 @@ public class MethodEmitter implements Emitter {
     }
 
     /**
-     * Goto, possibly when splitting is taking place. If
-     * a splitNode exists, we need to handle the case that the
-     * jump target is another method
-     *
-     * @param label destination label
-     * @param targetNode the node to which the destination label belongs (the label is normally a break or continue
-     * label)
-     */
-    void splitAwareGoto(final LexicalContext lc, final Label label, final BreakableNode targetNode) {
-        _goto(label);
-    }
-
-    /**
      * Perform a comparison of two number types that are popped from the stack
      *
      * @param isCmpG is this a dcmpg semantic, false if it's a dcmpl semantic
@@ -2120,7 +2113,14 @@ public class MethodEmitter implements Emitter {
 
         int pos = 0;
         for (int i = argCount - 1; i >= 0; i--) {
-            paramTypes[i] = stack.peek(pos++);
+            Type pt = stack.peek(pos++);
+            // "erase" specific ScriptObject subtype info - except for NativeArray.
+            // NativeArray is used for array/List/Deque conversion for Java calls.
+            if (ScriptObject.class.isAssignableFrom(pt.getTypeClass()) &&
+                !NativeArray.class.isAssignableFrom(pt.getTypeClass())) {
+                pt = Type.SCRIPT_OBJECT;
+            }
+            paramTypes[i] = pt;
         }
         final String descriptor = Type.getMethodDescriptor(returnType, paramTypes);
         for (int i = 0; i < argCount; i++) {
@@ -2131,10 +2131,15 @@ public class MethodEmitter implements Emitter {
     }
 
     MethodEmitter invalidateSpecialName(final String name) {
-        //this is a nop if the global hasn't registered this as a special name - we can just ignore it
-        if (Global.instance().isSpecialName(name)) {
-            debug("dynamic_invalidate_name", "name=", name);
-            method.visitInvokeDynamicInsn(name, "()V", INVALIDATE_NAME_BOOTSTRAP);
+        switch (name) {
+        case "apply":
+        case "call":
+            debug("invalidate_name", "name=", name);
+            load("Function");
+            invoke(ScriptRuntime.INVALIDATE_RESERVED_BUILTIN_NAME);
+            break;
+        default:
+            break;
         }
         return this;
     }
@@ -2575,9 +2580,52 @@ public class MethodEmitter implements Emitter {
      *
      * @param args debug information to print
      */
+    @SuppressWarnings("unused")
     private void debug(final Object... args) {
         if (debug) {
             debug(30, args);
+        }
+    }
+
+    private void debug(final String arg) {
+        if (debug) {
+            debug(30, arg);
+        }
+    }
+
+    private void debug(final Object arg0, final Object arg1) {
+        if (debug) {
+            debug(30, new Object[] { arg0, arg1 });
+        }
+    }
+
+    private void debug(final Object arg0, final Object arg1, final Object arg2) {
+        if (debug) {
+            debug(30, new Object[] { arg0, arg1, arg2 });
+        }
+    }
+
+    private void debug(final Object arg0, final Object arg1, final Object arg2, final Object arg3) {
+        if (debug) {
+            debug(30, new Object[] { arg0, arg1, arg2, arg3 });
+        }
+    }
+
+    private void debug(final Object arg0, final Object arg1, final Object arg2, final Object arg3, final Object arg4) {
+        if (debug) {
+            debug(30, new Object[] { arg0, arg1, arg2, arg3, arg4 });
+        }
+    }
+
+    private void debug(final Object arg0, final Object arg1, final Object arg2, final Object arg3, final Object arg4, final Object arg5) {
+        if (debug) {
+            debug(30, new Object[] { arg0, arg1, arg2, arg3, arg4, arg5 });
+        }
+    }
+
+    private void debug(final Object arg0, final Object arg1, final Object arg2, final Object arg3, final Object arg4, final Object arg5, final Object arg6) {
+        if (debug) {
+            debug(30, new Object[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6 });
         }
     }
 

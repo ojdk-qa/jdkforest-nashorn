@@ -25,6 +25,7 @@
 
 package jdk.nashorn.internal.ir;
 
+import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -49,6 +50,8 @@ import jdk.nashorn.internal.runtime.Undefined;
  */
 @Immutable
 public abstract class LiteralNode<T> extends Expression implements PropertyKey {
+    private static final long serialVersionUID = 1L;
+
     /** Literal value */
     protected final T value;
 
@@ -237,6 +240,10 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
         return value;
     }
 
+    private static Expression[] valueToArray(final List<Expression> value) {
+        return value.toArray(new Expression[value.size()]);
+    }
+
     /**
      * Create a new null literal
      *
@@ -266,6 +273,8 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
      * @param <T> the literal type
      */
     public static class PrimitiveLiteralNode<T> extends LiteralNode<T> {
+        private static final long serialVersionUID = 1L;
+
         private PrimitiveLiteralNode(final long token, final int finish, final T value) {
             super(token, finish, value);
         }
@@ -300,6 +309,7 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
 
     @Immutable
     private static final class BooleanLiteralNode extends PrimitiveLiteralNode<Boolean> {
+        private static final long serialVersionUID = 1L;
 
         private BooleanLiteralNode(final long token, final int finish, final boolean value) {
             super(Token.recast(token, value ? TokenType.TRUE : TokenType.FALSE), finish, value);
@@ -352,6 +362,7 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
 
     @Immutable
     private static final class NumberLiteralNode extends PrimitiveLiteralNode<Number> {
+        private static final long serialVersionUID = 1L;
 
         private final Type type = numberGetType(value);
 
@@ -414,6 +425,8 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
     }
 
     private static class UndefinedLiteralNode extends PrimitiveLiteralNode<Undefined> {
+        private static final long serialVersionUID = 1L;
+
         private UndefinedLiteralNode(final long token, final int finish) {
             super(Token.recast(token, TokenType.OBJECT), finish, ScriptRuntime.UNDEFINED);
         }
@@ -450,6 +463,8 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
 
     @Immutable
     private static class StringLiteralNode extends PrimitiveLiteralNode<String> {
+        private static final long serialVersionUID = 1L;
+
         private StringLiteralNode(final long token, final int finish, final String value) {
             super(Token.recast(token, TokenType.STRING), finish, value);
         }
@@ -493,6 +508,8 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
 
     @Immutable
     private static class LexerTokenLiteralNode extends LiteralNode<LexerToken> {
+        private static final long serialVersionUID = 1L;
+
         private LexerTokenLiteralNode(final long token, final int finish, final LexerToken value) {
             super(Token.recast(token, TokenType.STRING), finish, value); //TODO is string the correct token type here?
         }
@@ -556,6 +573,7 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
     }
 
     private static final class NullLiteralNode extends PrimitiveLiteralNode<Object> {
+        private static final long serialVersionUID = 1L;
 
         private NullLiteralNode(final long token, final int finish) {
             super(Token.recast(token, TokenType.OBJECT), finish, null);
@@ -586,6 +604,7 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
      */
     @Immutable
     public static final class ArrayLiteralNode extends LiteralNode<Expression[]> implements LexicalContextNode {
+        private static final long serialVersionUID = 1L;
 
         /** Array element type. */
         private final Type elementType;
@@ -603,7 +622,9 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
          * An ArrayUnit is a range in an ArrayLiteral. ArrayLiterals can
          * be split if they are too large, for bytecode generation reasons
          */
-        public static final class ArrayUnit implements CompileUnitHolder {
+        public static final class ArrayUnit implements CompileUnitHolder, Serializable {
+            private static final long serialVersionUID = 1L;
+
             /** Compile unit associated with the postsets range. */
             private final CompileUnit compileUnit;
 
@@ -651,13 +672,13 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
         private static final class ArrayLiteralInitializer {
 
             static ArrayLiteralNode initialize(final ArrayLiteralNode node) {
-                final Type elementType = computeElementType(node.value, node.elementType);
+                final Type elementType = computeElementType(node.value);
                 final int[] postsets = computePostsets(node.value);
                 final Object presets = computePresets(node.value, elementType, postsets);
                 return new ArrayLiteralNode(node, node.value, elementType, postsets, presets, node.units);
             }
 
-            private static Type computeElementType(final Expression[] value, final Type elementType) {
+            private static Type computeElementType(final Expression[] value) {
                 Type widestElementType = Type.INT;
 
                 for (final Expression elem : value) {
@@ -981,9 +1002,8 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
      * @return the new literal node
      */
     public static LiteralNode<Expression[]> newInstance(final long token, final int finish, final List<Expression> value) {
-        return new ArrayLiteralNode(token, finish, value.toArray(new Expression[value.size()]));
+        return new ArrayLiteralNode(token, finish, valueToArray(value));
     }
-
 
     /**
      * Create a new array literal based on a parent node (source, token, finish)
@@ -994,7 +1014,7 @@ public abstract class LiteralNode<T> extends Expression implements PropertyKey {
      * @return the new literal node
      */
     public static LiteralNode<?> newInstance(final Node parent, final List<Expression> value) {
-        return new ArrayLiteralNode(parent.getToken(), parent.getFinish(), value.toArray(new Expression[value.size()]));
+        return new ArrayLiteralNode(parent.getToken(), parent.getFinish(), valueToArray(value));
     }
 
     /**
