@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014 Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,35 +23,12 @@
  * questions.
  */
 
-package jdk.nashorn.internal.runtime.linker;
+package jdk.nashorn.test.models;
 
-import java.util.Objects;
-import jdk.internal.dynalink.beans.BeansLinker;
 
-/**
- * Represents a Dynalink dynamic method bound to a receiver. Note that objects of this class are just the tuples of
- * a method and a bound this, without any behavior. All the behavior is defined in the {@code BoundDynamicMethodLinker}.
- */
-final class BoundDynamicMethod {
-    private final Object dynamicMethod;
-    private final Object boundThis;
-
-    BoundDynamicMethod(final Object dynamicMethod, final Object boundThis) {
-        assert BeansLinker.isDynamicMethod(dynamicMethod);
-        this.dynamicMethod = dynamicMethod;
-        this.boundThis = boundThis;
-    }
-
-    Object getDynamicMethod() {
-        return dynamicMethod;
-    }
-
-    Object getBoundThis() {
-        return boundThis;
-    }
-
-    @Override
-    public String toString() {
-        return dynamicMethod.toString() + " on " + Objects.toString(boundThis);
-    }
+public class NullProvider {
+    public static Integer getInteger() { return null; }
+    public static Long getLong() { return null; }
+    public static Double getDouble() { return null; }
+    public static Boolean getBoolean() { return null; }
 }

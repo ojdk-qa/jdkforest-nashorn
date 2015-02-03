@@ -25,8 +25,11 @@
 
 package jdk.nashorn.internal.runtime.linker;
 
-import static jdk.nashorn.internal.runtime.linker.BrowserJSObjectLinker.JSObjectHandles.*;
-
+import static jdk.nashorn.internal.runtime.linker.BrowserJSObjectLinker.JSObjectHandles.JSOBJECT_GETMEMBER;
+import static jdk.nashorn.internal.runtime.linker.BrowserJSObjectLinker.JSObjectHandles.JSOBJECT_GETSLOT;
+import static jdk.nashorn.internal.runtime.linker.BrowserJSObjectLinker.JSObjectHandles.JSOBJECT_SETMEMBER;
+import static jdk.nashorn.internal.runtime.linker.BrowserJSObjectLinker.JSObjectHandles.JSOBJECT_SETSLOT;
+import static jdk.nashorn.internal.runtime.linker.BrowserJSObjectLinker.JSObjectHandles.JSOBJECT_CALL;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import jdk.internal.dynalink.CallSiteDescriptor;
@@ -114,15 +117,15 @@ final class BrowserJSObjectLinker implements TypeBasedGuardingDynamicLinker {
             case "getMethod":
                 if (c > 2) {
                     return findGetMethod(desc);
-                } else {
-                    // For indexed get, we want GuardedInvocation from beans linker and pass it.
-                    // BrowserJSObjectLinker.get uses this fallback getter for explicit signature method access.
-                    final GuardedInvocation beanInv = nashornBeansLinker.getGuardedInvocation(request, linkerServices);
-                    return findGetIndexMethod(beanInv);
                 }
+            // For indexed get, we want GuardedInvocation from beans linker and pass it.
+            // BrowserJSObjectLinker.get uses this fallback getter for explicit signature method access.
+            return findGetIndexMethod(nashornBeansLinker.getGuardedInvocation(request, linkerServices));
             case "setProp":
             case "setElem":
                 return c > 2 ? findSetMethod(desc) : findSetIndexMethod();
+            case "call":
+                return findCallMethod(desc);
             default:
                 return null;
         }
@@ -148,6 +151,11 @@ final class BrowserJSObjectLinker implements TypeBasedGuardingDynamicLinker {
         return new GuardedInvocation(JSOBJECTLINKER_PUT, IS_JSOBJECT_GUARD);
     }
 
+    private static GuardedInvocation findCallMethod(final CallSiteDescriptor desc) {
+        final MethodHandle call = MH.insertArguments(JSOBJECT_CALL, 1, "call");
+        return new GuardedInvocation(MH.asCollector(call, Object[].class, desc.getMethodType().parameterCount() - 1), IS_JSOBJECT_GUARD);
+    }
+
     @SuppressWarnings("unused")
     private static boolean isJSObject(final Object self) {
         return jsObjectClass.isInstance(self);
@@ -166,9 +174,8 @@ final class BrowserJSObjectLinker implements TypeBasedGuardingDynamicLinker {
             final String name = (String)key;
             if (name.indexOf('(') != -1) {
                 return fallback.invokeExact(jsobj, key);
-            } else {
-                return JSOBJECT_GETMEMBER.invokeExact(jsobj, (String)key);
             }
+            return JSOBJECT_GETMEMBER.invokeExact(jsobj, (String)key);
         }
         return null;
     }
@@ -208,6 +215,7 @@ final class BrowserJSObjectLinker implements TypeBasedGuardingDynamicLinker {
         static final MethodHandle JSOBJECT_GETSLOT       = findJSObjectMH_V("getSlot", Object.class, int.class).asType(MH.type(Object.class, Object.class, int.class));
         static final MethodHandle JSOBJECT_SETMEMBER     = findJSObjectMH_V("setMember", Void.TYPE, String.class, Object.class).asType(MH.type(Void.TYPE, Object.class, String.class, Object.class));
         static final MethodHandle JSOBJECT_SETSLOT       = findJSObjectMH_V("setSlot", Void.TYPE, int.class, Object.class).asType(MH.type(Void.TYPE, Object.class, int.class, Object.class));
+        static final MethodHandle JSOBJECT_CALL          = findJSObjectMH_V("call", Object.class, String.class, Object[].class).asType(MH.type(Object.class, Object.class, String.class, Object[].class));
 
         private static MethodHandle findJSObjectMH_V(final String name, final Class<?> rtype, final Class<?>... types) {
             checkJSObjectClass();

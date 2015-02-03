@@ -287,10 +287,21 @@ abstract class AbstractJavaLinker implements GuardingDynamicLinker {
      */
     private static SingleDynamicMethod createDynamicMethod(final AccessibleObject m) {
         if(CallerSensitiveDetector.isCallerSensitive(m)) {
+            // Method has @CallerSensitive annotation
             return new CallerSensitiveDynamicMethod(m);
         }
+        // Method has no @CallerSensitive annotation
+        final MethodHandle mh;
+        try {
+            mh = unreflectSafely(m);
+        } catch (final IllegalAccessError e) {
+            // java.lang.invoke can in some case conservatively treat as caller sensitive methods that aren't
+            // marked with the annotation. In this case, we'll fall back to treating it as caller sensitive.
+            return new CallerSensitiveDynamicMethod(m);
+        }
+        // Proceed with non-caller sensitive
         final Member member = (Member)m;
-        return new SimpleDynamicMethod(unreflectSafely(m), member.getDeclaringClass(), member.getName(), m instanceof Constructor);
+        return new SimpleDynamicMethod(mh, member.getDeclaringClass(), member.getName(), m instanceof Constructor);
     }
 
     /**
@@ -480,8 +491,9 @@ abstract class AbstractJavaLinker implements GuardingDynamicLinker {
 
                 // We want setters that conform to "Object(O, V)". Note, we aren't doing "R(O, V)" as it might not be
                 // valid for us to convert return values proactively. Also, since we don't know what setters will be
-                // invoked, we'll conservatively presume Object return type.
-                final MethodType type = callSiteDescriptor.getMethodType().changeReturnType(Object.class);
+                // invoked, we'll conservatively presume Object return type. The one exception is void return.
+                final MethodType origType = callSiteDescriptor.getMethodType();
+                final MethodType type = origType.returnType() == void.class ? origType : origType.changeReturnType(Object.class);
 
                 // What's below is basically:
                 //   foldArguments(guardWithTest(isNotNull, invoke, null|nextComponent.invocation),
@@ -497,7 +509,7 @@ abstract class AbstractJavaLinker implements GuardingDynamicLinker {
                 // Bind property setter handle to the expected setter type and linker services. Type is
                 // MethodHandle(Object, String, Object)
                 final MethodHandle boundGetter = MethodHandles.insertArguments(getPropertySetterHandle, 0,
-                        CallSiteDescriptorFactory.dropParameterTypes(callSiteDescriptor, 1, 2), linkerServices);
+                        callSiteDescriptor.changeMethodType(setterType), linkerServices);
 
                 // Cast getter to MethodHandle(O, N, V)
                 final MethodHandle typedGetter = linkerServices.asType(boundGetter, type.changeReturnType(

@@ -208,6 +208,8 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
     private static final Type ITERATOR_TYPE = Type.typeFor(ITERATOR_CLASS);
     private static final Type EXCEPTION_TYPE = Type.typeFor(CompilerConstants.EXCEPTION_PREFIX.type());
 
+    private static final Integer INT_ZERO = Integer.valueOf(0);
+
     /** Constant data & installation. The only reason the compiler keeps this is because it is assigned
      *  by reflection in class installation */
     private final Compiler compiler;
@@ -463,10 +465,10 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
             // If this is either __FILE__, __DIR__, or __LINE__ then load the property initially as Object as we'd convert
             // it anyway for replaceLocationPropertyPlaceholder.
             if(identNode.isCompileTimePropertyName()) {
-                method.dynamicGet(Type.OBJECT, identNode.getSymbol().getName(), flags, identNode.isFunction());
+                method.dynamicGet(Type.OBJECT, identNode.getSymbol().getName(), flags, identNode.isFunction(), false);
                 replaceCompileTimeProperty();
             } else {
-                dynamicGet(identNode.getSymbol().getName(), flags, identNode.isFunction());
+                dynamicGet(identNode.getSymbol().getName(), flags, identNode.isFunction(), false);
             }
         }
     }
@@ -484,7 +486,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
 
     private MethodEmitter storeFastScopeVar(final Symbol symbol, final int flags) {
         loadFastScopeProto(symbol, true);
-        method.dynamicSet(symbol.getName(), flags | CALLSITE_FAST_SCOPE);
+        method.dynamicSet(symbol.getName(), flags | CALLSITE_FAST_SCOPE, false);
         return method;
     }
 
@@ -569,9 +571,11 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
 
         // Operands' load type should not be narrower than the narrowest of the individual operand types, nor narrower
         // than the lower explicit bound, but it should also not be wider than
-        final Type narrowestOperandType = Type.narrowest(Type.widest(lhs.getType(), rhs.getType()), explicitOperandBounds.widest);
+        final Type lhsType = undefinedToNumber(lhs.getType());
+        final Type rhsType = undefinedToNumber(rhs.getType());
+        final Type narrowestOperandType = Type.narrowest(Type.widest(lhsType, rhsType), explicitOperandBounds.widest);
         final TypeBounds operandBounds = explicitOperandBounds.notNarrowerThan(narrowestOperandType);
-        if (noToPrimitiveConversion(lhs.getType(), explicitOperandBounds.widest) || rhs.isLocal()) {
+        if (noToPrimitiveConversion(lhsType, explicitOperandBounds.widest) || rhs.isLocal()) {
             // Can reorder. We might still need to separate conversion, but at least we can do it with reordering
             if (forceConversionSeparation) {
                 // Can reorder, but can't move conversion into the operand as the operation depends on operands
@@ -592,10 +596,10 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
             // Can't reorder. Load and convert separately.
             final TypeBounds safeConvertBounds = TypeBounds.UNBOUNDED.notNarrowerThan(narrowestOperandType);
             loadExpression(lhs, safeConvertBounds, baseAlreadyOnStack);
-            final Type lhsType = method.peekType();
+            final Type lhsLoadedType = method.peekType();
             loadExpression(rhs, safeConvertBounds, false);
             final Type convertedLhsType = operandBounds.within(method.peekType());
-            if (convertedLhsType != lhsType) {
+            if (convertedLhsType != lhsLoadedType) {
                 // Do it conditionally, so that if conversion is a no-op we don't introduce a SWAP, SWAP.
                 method.swap().convert(convertedLhsType).swap();
             }
@@ -607,13 +611,16 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
         return method;
     }
 
+    private static final Type undefinedToNumber(final Type type) {
+        return type == Type.UNDEFINED ? Type.NUMBER : type;
+    }
+
     private static final class TypeBounds {
         final Type narrowest;
         final Type widest;
 
         static final TypeBounds UNBOUNDED = new TypeBounds(Type.UNKNOWN, Type.OBJECT);
         static final TypeBounds INT = exact(Type.INT);
-        static final TypeBounds NUMBER = exact(Type.NUMBER);
         static final TypeBounds OBJECT = exact(Type.OBJECT);
         static final TypeBounds BOOLEAN = exact(Type.BOOLEAN);
 
@@ -738,7 +745,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
                     @Override
                     void consumeStack() {
                         final int flags = getCallSiteFlags();
-                        dynamicGet(accessNode.getProperty(), flags, accessNode.isFunction());
+                        dynamicGet(accessNode.getProperty(), flags, accessNode.isFunction(), accessNode.isIndex());
                     }
                 }.emit(baseAlreadyOnStack ? 1 : 0);
                 return false;
@@ -1442,7 +1449,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
                         // NOTE: not using a nested OptimisticOperation on this dynamicGet, as we expect to get back
                         // a callable object. Nobody in their right mind would optimistically type this call site.
                         assert !node.isOptimistic();
-                        method.dynamicGet(node.getType(), node.getProperty(), flags, true);
+                        method.dynamicGet(node.getType(), node.getProperty(), flags, true, node.isIndex());
                         method.swap();
                         argCount = loadArgs(args);
                     }
@@ -2014,6 +2021,19 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
         final Expression test = ifNode.getTest();
         final Block pass = ifNode.getPass();
         final Block fail = ifNode.getFail();
+
+        if (Expression.isAlwaysTrue(test)) {
+            loadAndDiscard(test);
+            pass.accept(this);
+            return false;
+        } else if (Expression.isAlwaysFalse(test)) {
+            loadAndDiscard(test);
+            if (fail != null) {
+                fail.accept(this);
+            }
+            return false;
+        }
+
         final boolean hasFailConversion = LocalVariableConversion.hasLiveConversion(ifNode);
 
         final Label failLabel  = new Label("if_fail");
@@ -2033,7 +2053,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
             method.beforeJoinPoint(ifNode);
         }
 
-        if(afterLabel != null) {
+        if(afterLabel != null && afterLabel.isReachable()) {
             method.label(afterLabel);
         }
 
@@ -2810,7 +2830,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
         Label defaultLabel = defaultCase != null ? defaultCase.getEntry() : breakLabel;
         final boolean hasSkipConversion = LocalVariableConversion.hasLiveConversion(switchNode);
 
-        if (switchNode.isInteger()) {
+        if (switchNode.isUniqueInteger()) {
             // Tree for sorting values.
             final TreeMap<Integer, Label> tree = new TreeMap<>();
 
@@ -3144,14 +3164,13 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
             if (isFastScope(identSymbol)) {
                 storeFastScopeVar(identSymbol, flags);
             } else {
-                method.dynamicSet(identNode.getName(), flags);
+                method.dynamicSet(identNode.getName(), flags, false);
             }
         } else {
             final Type identType = identNode.getType();
             if(identType == Type.UNDEFINED) {
-                // The symbol must not be slotted; the initializer is either itself undefined (explicit assignment of
-                // undefined to undefined), or the left hand side is a dead variable.
-                assert !identNode.getSymbol().isScope();
+                // The initializer is either itself undefined (explicit assignment of undefined to undefined),
+                // or the left hand side is a dead variable.
                 assert init.getType() == Type.UNDEFINED || identNode.getSymbol().slotCount() == 0;
                 loadAndDiscard(init);
                 return false;
@@ -3261,6 +3280,13 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
         body.accept(this);
         if(repeatLabel != continueLabel) {
             emitContinueLabel(continueLabel, liveLocalsOnContinue);
+        }
+
+        if (loopNode.hasPerIterationScope() && lc.getCurrentBlock().needsScope()) {
+            // ES6 for loops with LET init need a new scope for each iteration. We just create a shallow copy here.
+            method.loadCompilerConstant(SCOPE);
+            method.invoke(virtualCallNoLookup(ScriptObject.class, "copy", ScriptObject.class));
+            method.storeCompilerConstant(SCOPE);
         }
 
         if(method.isReachable()) {
@@ -3567,8 +3593,9 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
                     operandBounds = new TypeBounds(binaryNode.getType(), Type.OBJECT);
                 } else {
                     // Non-optimistic, non-FP +. Allow it to overflow.
-                    operandBounds = new TypeBounds(binaryNode.getWidestOperandType(), Type.OBJECT);
-                    forceConversionSeparation = binaryNode.getWidestOperationType().narrowerThan(resultBounds.widest);
+                    final Type widestOperationType = binaryNode.getWidestOperationType();
+                    operandBounds = new TypeBounds(Type.narrowest(binaryNode.getWidestOperandType(), resultBounds.widest), widestOperationType);
+                    forceConversionSeparation = widestOperationType.narrowerThan(resultBounds.widest);
                 }
                 loadBinaryOperands(binaryNode.lhs(), binaryNode.rhs(), operandBounds, false, forceConversionSeparation);
             }
@@ -3683,8 +3710,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
             final Expression lhs = assignNode.lhs();
             final Expression rhs = assignNode.rhs();
             final Type widestOperationType = assignNode.getWidestOperationType();
-            final Type widest = assignNode.isTokenType(TokenType.ASSIGN_ADD) ? Type.OBJECT : widestOperationType;
-            final TypeBounds bounds = new TypeBounds(assignNode.getType(), widest);
+            final TypeBounds bounds = new TypeBounds(assignNode.getType(), widestOperationType);
             new OptimisticOperation(assignNode, bounds) {
                 @Override
                 void loadStack() {
@@ -3817,7 +3843,12 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
 
     private void doSHR() {
         // TODO: make SHR optimistic
-        method.shr().convert(Type.LONG).load(JSType.MAX_UINT).and();
+        method.shr();
+        toUint();
+    }
+
+    private void toUint() {
+        JSType.TO_UINT32_I.invoke(method);
     }
 
     private void loadASSIGN_SUB(final BinaryNode binaryNode) {
@@ -3849,12 +3880,8 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
                         operandBounds = numericBounds;
                     } else {
                         final boolean isOptimistic = isValid(getProgramPoint());
-                        if(isOptimistic) {
+                        if(isOptimistic || node.isTokenType(TokenType.DIV) || node.isTokenType(TokenType.MOD)) {
                             operandBounds = new TypeBounds(node.getType(), Type.NUMBER);
-                        } else if(node.isTokenType(TokenType.DIV) || node.isTokenType(TokenType.MOD)) {
-                            // Non-optimistic division must always take double arguments as its result must also be
-                            // double.
-                            operandBounds = TypeBounds.NUMBER;
                         } else {
                             // Non-optimistic, non-FP subtraction or multiplication. Allow them to overflow.
                             operandBounds = new TypeBounds(Type.narrowest(node.getWidestOperandType(),
@@ -3879,8 +3906,18 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
     }
 
     private void loadBIT_OR(final BinaryNode binaryNode) {
-        loadBinaryOperands(binaryNode);
-        method.or();
+        // Optimize x|0 to (int)x
+        if (isRhsZero(binaryNode)) {
+            loadExpressionAsType(binaryNode.lhs(), Type.INT);
+        } else {
+            loadBinaryOperands(binaryNode);
+            method.or();
+        }
+    }
+
+    private static boolean isRhsZero(final BinaryNode binaryNode) {
+        final Expression rhs = binaryNode.rhs();
+        return rhs instanceof LiteralNode && INT_ZERO.equals(((LiteralNode<?>)rhs).getValue());
     }
 
     private void loadBIT_XOR(final BinaryNode binaryNode) {
@@ -3957,8 +3994,14 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
     }
 
     private void loadSHR(final BinaryNode binaryNode) {
-        loadBinaryOperands(binaryNode);
-        doSHR();
+        // Optimize x >>> 0 to (uint)x
+        if (isRhsZero(binaryNode)) {
+            loadExpressionAsType(binaryNode.lhs(), Type.INT);
+            toUint();
+        } else {
+            loadBinaryOperands(binaryNode);
+            doSHR();
+        }
     }
 
     private void loadSUB(final BinaryNode binaryNode, final TypeBounds resultBounds) {
@@ -4225,7 +4268,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
                         if (isFastScope(symbol)) {
                             storeFastScopeVar(symbol, flags);
                         } else {
-                            method.dynamicSet(node.getName(), flags);
+                            method.dynamicSet(node.getName(), flags, false);
                         }
                     } else {
                         final Type storeType = assignNode.getType();
@@ -4242,7 +4285,7 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
 
                 @Override
                 public boolean enterAccessNode(final AccessNode node) {
-                    method.dynamicSet(node.getProperty(), getCallSiteFlags());
+                    method.dynamicSet(node.getProperty(), getCallSiteFlags(), node.isIndex());
                     return false;
                 }
 
@@ -4580,11 +4623,11 @@ final class CodeGenerator extends NodeOperatorVisitor<CodeGeneratorLexicalContex
          * @param isMethod whether we're preferrably retrieving a function
          * @return the current method emitter
          */
-        MethodEmitter dynamicGet(final String name, final int flags, final boolean isMethod) {
+        MethodEmitter dynamicGet(final String name, final int flags, final boolean isMethod, final boolean isIndex) {
             if(isOptimistic) {
-                return method.dynamicGet(getOptimisticCoercedType(), name, getOptimisticFlags(flags), isMethod);
+                return method.dynamicGet(getOptimisticCoercedType(), name, getOptimisticFlags(flags), isMethod, isIndex);
             }
-            return method.dynamicGet(resultBounds.within(expression.getType()), name, nonOptimisticFlags(flags), isMethod);
+            return method.dynamicGet(resultBounds.within(expression.getType()), name, nonOptimisticFlags(flags), isMethod, isIndex);
         }
 
         MethodEmitter dynamicGetIndex(final int flags, final boolean isMethod) {

@@ -42,11 +42,11 @@ import static jdk.nashorn.internal.test.framework.TestConfig.TEST_JS_INCLUDES;
 import static jdk.nashorn.internal.test.framework.TestConfig.TEST_JS_LIST;
 import static jdk.nashorn.internal.test.framework.TestConfig.TEST_JS_ROOTS;
 import static jdk.nashorn.internal.test.framework.TestConfig.TEST_JS_UNCHECKED_DIR;
-
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.nio.ByteOrder;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.FileVisitOption;
@@ -76,6 +76,7 @@ import org.xml.sax.InputSource;
  * Utility class to find/parse script test files and to create 'test' instances.
  * Actual 'test' object type is decided by clients of this class.
  */
+@SuppressWarnings("javadoc")
 public final class TestFinder {
     private TestFinder() {}
 
@@ -264,6 +265,12 @@ public final class TestFinder {
                     isTest = false;
                     isNotTest = true;
                     break;
+                case "@bigendian":
+                    shouldRun = ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
+                    break;
+                case "@littleendian":
+                    shouldRun = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+                    break;
                 case "@runif": {
                     final String prop = scanner.next();
                     if (System.getProperty(prop) != null) {
@@ -298,6 +305,8 @@ public final class TestFinder {
                     break;
                 case "@fork":
                     fork = true;
+                    break;
+                default:
                     break;
                 }
 
@@ -377,7 +386,7 @@ public final class TestFinder {
      *
      * @args new argument list array
      */
-    public static String[] addExplicitOptimisticTypes(String[] args) {
+    public static String[] addExplicitOptimisticTypes(final String[] args) {
         if (hasOptimisticOverride()) {
             final List<String> newList = new ArrayList<>(Arrays.asList(args));
             newList.add("--optimistic-types=" + Boolean.valueOf(OPTIMISTIC_OVERRIDE));
@@ -392,7 +401,7 @@ public final class TestFinder {
      *
      * @args argument list
      */
-    public static void addExplicitOptimisticTypes(List<String> args) {
+    public static void addExplicitOptimisticTypes(final List<String> args) {
         if (hasOptimisticOverride()) {
             args.add("--optimistic-types=" + Boolean.valueOf(OPTIMISTIC_OVERRIDE));
         }

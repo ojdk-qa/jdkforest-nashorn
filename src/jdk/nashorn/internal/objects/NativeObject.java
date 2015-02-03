@@ -673,7 +673,7 @@ public final class NativeObject {
             for (final Property prop : properties) {
                 if (prop.isEnumerable()) {
                     final Object value = sourceObj.get(prop.getKey());
-                    prop.setCurrentType(Object.class);
+                    prop.setType(Object.class);
                     prop.setValue(sourceObj, sourceObj, value, false);
                     propList.add(prop);
                 }
@@ -805,7 +805,7 @@ public final class NativeObject {
             // name and object linked with BeansLinker. (Actually, an even stronger assumption is true: return value is
             // constant for any given method name and object's class.)
             return MethodHandles.dropArguments(MethodHandles.constant(Object.class,
-                    Bootstrap.bindDynamicMethod(methodGetter.invoke(source), source)), 0, Object.class);
+                    Bootstrap.bindCallable(methodGetter.invoke(source), source, null)), 0, Object.class);
         } catch(RuntimeException|Error e) {
             throw e;
         } catch(final Throwable t) {

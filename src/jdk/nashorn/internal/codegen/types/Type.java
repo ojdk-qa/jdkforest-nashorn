@@ -356,7 +356,7 @@ public abstract class Type implements Comparable<Type>, BytecodeOps, Serializabl
             final int pp = input.readInt();
             final int typeChar = input.readByte();
             final Type type;
-            switch(typeChar) {
+            switch (typeChar) {
                 case 'L': type = Type.OBJECT; break;
                 case 'D': type = Type.NUMBER; break;
                 case 'J': type = Type.LONG; break;
@@ -376,13 +376,13 @@ public abstract class Type implements Comparable<Type>, BytecodeOps, Serializabl
     }
 
     private static jdk.internal.org.objectweb.asm.Type lookupInternalType(final Class<?> type) {
-        final Map<Class<?>, jdk.internal.org.objectweb.asm.Type> cache = INTERNAL_TYPE_CACHE;
-        jdk.internal.org.objectweb.asm.Type itype = cache.get(type);
+        final Map<Class<?>, jdk.internal.org.objectweb.asm.Type> c = INTERNAL_TYPE_CACHE;
+        jdk.internal.org.objectweb.asm.Type itype = c.get(type);
         if (itype != null) {
             return itype;
         }
         itype = jdk.internal.org.objectweb.asm.Type.getType(type);
-        cache.put(type, itype);
+        c.put(type, itype);
         return itype;
     }
 
@@ -586,6 +586,7 @@ public abstract class Type implements Comparable<Type>, BytecodeOps, Serializabl
     public int getSlots() {
         return slots;
     }
+
     /**
      * Returns the widest or most common of two types
      *
@@ -606,6 +607,18 @@ public abstract class Type implements Comparable<Type>, BytecodeOps, Serializabl
             return Type.OBJECT;
         }
         return type0.weight() > type1.weight() ? type0 : type1;
+    }
+
+    /**
+     * Returns the widest or most common of two types, given as classes
+     *
+     * @param type0 type one
+     * @param type1 type two
+     *
+     * @return the widest type
+     */
+    public static Class<?> widest(final Class<?> type0, final Class<?> type1) {
+        return widest(Type.typeFor(type0), Type.typeFor(type1)).getTypeClass();
     }
 
     /**
@@ -1142,6 +1155,10 @@ public abstract class Type implements Comparable<Type>, BytecodeOps, Serializabl
         return type;
     }
 
+    /**
+     * Read resolve
+     * @return resolved type
+     */
     protected final Object readResolve() {
         return Type.typeFor(clazz);
     }

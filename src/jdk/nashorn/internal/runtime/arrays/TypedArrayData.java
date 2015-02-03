@@ -58,7 +58,7 @@ public abstract class TypedArrayData<T extends Buffer> extends ContinuousArrayDa
      * @return element length
      */
     public final int getElementLength() {
-        return (int)length;
+        return (int)length();
     }
 
     /**
@@ -88,7 +88,7 @@ public abstract class TypedArrayData<T extends Buffer> extends ContinuousArrayDa
     }
 
     @Override
-    public ArrayData copy() {
+    public TypedArrayData<T> copy() {
         throw new UnsupportedOperationException();
     }
 
@@ -119,7 +119,7 @@ public abstract class TypedArrayData<T extends Buffer> extends ContinuousArrayDa
 
     @Override
     public final boolean has(final int index) {
-        return 0 <= index && index < length;
+        return 0 <= index && index < length();
     }
 
     @Override
@@ -133,7 +133,7 @@ public abstract class TypedArrayData<T extends Buffer> extends ContinuousArrayDa
     }
 
     @Override
-    public ArrayData convert(final Class<?> type) {
+    public TypedArrayData<T> convert(final Class<?> type) {
         throw new UnsupportedOperationException();
     }
 

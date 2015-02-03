@@ -559,7 +559,7 @@ loop:
         // Set up new block. Captures first token.
         Block newBlock = newBlock();
         try {
-            statement();
+            statement(false, false, true);
         } finally {
             newBlock = restoreBlock(newBlock);
         }
@@ -707,20 +707,9 @@ loop:
             FunctionNode.Kind.SCRIPT,
             functionLine);
 
-        // If ES6 block scope is enabled add a per-script block for top-level LET and CONST declarations.
-        final int startLine = start;
-        Block outer = useBlockScope() ? newBlock() : null;
         functionDeclarations = new ArrayList<>();
-
-        try {
-            sourceElements(allowPropertyFunction);
-            addFunctionDeclarations(script);
-        } finally {
-            if (outer != null) {
-                outer = restoreBlock(outer);
-                appendStatement(new BlockStatement(startLine, outer));
-            }
-        }
+        sourceElements(allowPropertyFunction);
+        addFunctionDeclarations(script);
         functionDeclarations = null;
 
         expect(EOF);
@@ -783,7 +772,7 @@ loop:
 
                 try {
                     // Get the next element.
-                    statement(true, allowPropertyFunction);
+                    statement(true, allowPropertyFunction, false);
                     allowPropertyFunction = false;
 
                     // check for directive prologues
@@ -873,13 +862,15 @@ loop:
      * Parse any of the basic statement types.
      */
     private void statement() {
-        statement(false, false);
+        statement(false, false, false);
     }
 
     /**
      * @param topLevel does this statement occur at the "top level" of a script or a function?
+     * @param allowPropertyFunction allow property "get" and "set" functions?
+     * @param singleStatement are we in a single statement context?
      */
-    private void statement(final boolean topLevel, final boolean allowPropertyFunction) {
+    private void statement(final boolean topLevel, final boolean allowPropertyFunction, final boolean singleStatement) {
         if (type == FUNCTION) {
             // As per spec (ECMA section 12), function declarations as arbitrary statement
             // is not "portable". Implementation can issue a warning or disallow the same.
@@ -943,6 +934,9 @@ loop:
             break;
         default:
             if (useBlockScope() && (type == LET || type == CONST)) {
+                if (singleStatement) {
+                    throw error(AbstractParser.message("expected.stmt", type.getName() + " declaration"), token);
+                }
                 variableStatement(type, true);
                 break;
             }
@@ -1068,7 +1062,7 @@ loop:
         next();
 
         final List<VarNode> vars = new ArrayList<>();
-        int varFlags = VarNode.IS_STATEMENT;
+        int varFlags = 0;
         if (varType == LET) {
             varFlags |= VarNode.IS_LET;
         } else if (varType == CONST) {
@@ -1221,7 +1215,7 @@ loop:
         Block outer = useBlockScope() ? newBlock() : null;
 
         // Create FOR node, capturing FOR token.
-        ForNode forNode = new ForNode(line, token, Token.descPosition(token), null, ForNode.IS_FOR);
+        ForNode forNode = new ForNode(line, token, Token.descPosition(token), null, 0);
         lc.push(forNode);
 
         try {
@@ -1241,19 +1235,22 @@ loop:
 
             switch (type) {
             case VAR:
-                // Var statements captured in for outer block.
+                // Var declaration captured in for outer block.
                 vars = variableStatement(type, false);
                 break;
             case SEMICOLON:
                 break;
             default:
                 if (useBlockScope() && (type == LET || type == CONST)) {
-                    // LET/CONST captured in container block created above.
+                    if (type == LET) {
+                        forNode = forNode.setPerIterationScope(lc);
+                    }
+                    // LET/CONST declaration captured in container block created above.
                     vars = variableStatement(type, false);
                     break;
                 }
                 if (env._const_as_var && type == CONST) {
-                    // Var statements captured in for outer block.
+                    // Var declaration captured in for outer block.
                     vars = variableStatement(TokenType.VAR, false);
                     break;
                 }
@@ -1334,11 +1331,12 @@ loop:
             appendStatement(forNode);
         } finally {
             lc.pop(forNode);
-            if (outer != null) {
-                outer.setFinish(forNode.getFinish());
-                outer = restoreBlock(outer);
-                appendStatement(new BlockStatement(startLine, outer));
-            }
+        }
+
+        if (outer != null) {
+            outer.setFinish(forNode.getFinish());
+            outer = restoreBlock(outer);
+            appendStatement(new BlockStatement(startLine, outer));
         }
     }
 
@@ -2646,7 +2644,7 @@ loop:
         // name is null, generate anonymous name
         boolean isAnonymous = false;
         if (name == null) {
-            final String tmpName = getDefaultValidFunctionName(functionLine);
+            final String tmpName = getDefaultValidFunctionName(functionLine, isStatement);
             name = new IdentNode(functionToken, Token.descPosition(functionToken), tmpName);
             isAnonymous = true;
         }
@@ -2655,7 +2653,15 @@ loop:
         final List<IdentNode> parameters = formalParameterList();
         expect(RPAREN);
 
-        FunctionNode functionNode = functionBody(functionToken, name, parameters, FunctionNode.Kind.NORMAL, functionLine);
+        FunctionNode functionNode;
+        // Hide the current default name across function boundaries. E.g. "x3 = function x1() { function() {}}"
+        // If we didn't hide the current default name, then the innermost anonymous function would receive "x3".
+        hideDefaultName();
+        try {
+            functionNode = functionBody(functionToken, name, parameters, FunctionNode.Kind.NORMAL, functionLine);
+        } finally {
+            defaultNames.pop();
+        }
 
         if (isStatement) {
             if (topLevel || useBlockScope()) {
@@ -2710,11 +2716,7 @@ loop:
         }
 
         if (isStatement) {
-            int varFlags = VarNode.IS_STATEMENT;
-            if (!topLevel && useBlockScope()) {
-                // mark ES6 block functions as lexically scoped
-                varFlags |= VarNode.IS_LET;
-            }
+            final int     varFlags = (topLevel || !useBlockScope()) ? 0 : VarNode.IS_LET;
             final VarNode varNode = new VarNode(functionLine, functionToken, finish, name, functionNode, varFlags);
             if (topLevel) {
                 functionDeclarations.add(varNode);
@@ -2728,9 +2730,17 @@ loop:
         return functionNode;
     }
 
-    private String getDefaultValidFunctionName(final int functionLine) {
+    private String getDefaultValidFunctionName(final int functionLine, final boolean isStatement) {
         final String defaultFunctionName = getDefaultFunctionName();
-        return isValidIdentifier(defaultFunctionName) ? defaultFunctionName : ANON_FUNCTION_PREFIX.symbolName() + functionLine;
+        if (isValidIdentifier(defaultFunctionName)) {
+            if (isStatement) {
+                // The name will be used as the LHS of a symbol assignment. We add the anonymous function
+                // prefix to ensure that it can't clash with another variable.
+                return ANON_FUNCTION_PREFIX.symbolName() + defaultFunctionName;
+            }
+            return defaultFunctionName;
+        }
+        return ANON_FUNCTION_PREFIX.symbolName() + functionLine;
     }
 
     private static boolean isValidIdentifier(final String name) {
@@ -2764,6 +2774,10 @@ loop:
 
     private void markDefaultNameUsed() {
         defaultNames.pop();
+        hideDefaultName();
+    }
+
+    private void hideDefaultName() {
         // Can be any value as long as getDefaultFunctionName doesn't recognize it as something it can extract a value
         // from. Can't be null
         defaultNames.push("");

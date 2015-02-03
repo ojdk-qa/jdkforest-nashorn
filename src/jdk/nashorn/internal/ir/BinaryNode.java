@@ -264,6 +264,10 @@ public final class BinaryNode extends Expression implements Assignment<Expressio
         case COMMARIGHT: {
             return rhs.getType(localVariableTypes);
         }
+        case AND:
+        case OR:{
+            return Type.widestReturnType(lhs.getType(localVariableTypes), rhs.getType(localVariableTypes));
+        }
         default:
             if (isComparison()) {
                 return Type.BOOLEAN;
@@ -337,10 +341,7 @@ public final class BinaryNode extends Expression implements Assignment<Expressio
     @Override
     public Node accept(final NodeVisitor<? extends LexicalContext> visitor) {
         if (visitor.enterBinaryNode(this)) {
-            if(tokenType().isLeftAssociative()) {
-                return visitor.leaveBinaryNode(setLHS((Expression)lhs.accept(visitor)).setRHS((Expression)rhs.accept(visitor)));
-            }
-            return visitor.leaveBinaryNode(setRHS((Expression)rhs.accept(visitor)).setLHS((Expression)lhs.accept(visitor)));
+            return visitor.leaveBinaryNode(setLHS((Expression)lhs.accept(visitor)).setRHS((Expression)rhs.accept(visitor)));
         }
 
         return this;

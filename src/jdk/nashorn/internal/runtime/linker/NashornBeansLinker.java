@@ -25,20 +25,29 @@
 
 package jdk.nashorn.internal.runtime.linker;
 
+import static jdk.nashorn.internal.lookup.Lookup.MH;
+import static jdk.nashorn.internal.runtime.ECMAErrors.typeError;
+
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import jdk.internal.dynalink.CallSiteDescriptor;
 import jdk.internal.dynalink.beans.BeansLinker;
 import jdk.internal.dynalink.linker.ConversionComparator.Comparison;
 import jdk.internal.dynalink.linker.GuardedInvocation;
 import jdk.internal.dynalink.linker.GuardingDynamicLinker;
 import jdk.internal.dynalink.linker.LinkRequest;
 import jdk.internal.dynalink.linker.LinkerServices;
+import jdk.internal.dynalink.support.Guards;
 import jdk.internal.dynalink.support.Lookup;
 import jdk.nashorn.api.scripting.ScriptUtils;
 import jdk.nashorn.internal.objects.NativeArray;
 import jdk.nashorn.internal.runtime.ConsString;
+import jdk.nashorn.internal.runtime.Context;
 import jdk.nashorn.internal.runtime.ScriptObject;
+import jdk.nashorn.internal.runtime.ScriptRuntime;
 import jdk.nashorn.internal.runtime.options.Options;
 
 /**
@@ -53,15 +62,64 @@ public class NashornBeansLinker implements GuardingDynamicLinker {
     // Object type arguments of Java method calls, field set and array set.
     private static final boolean MIRROR_ALWAYS = Options.getBooleanProperty("nashorn.mirror.always", true);
 
-    private static final MethodHandle EXPORT_ARGUMENT = new Lookup(MethodHandles.lookup()).findOwnStatic("exportArgument", Object.class, Object.class);
-    private static final MethodHandle EXPORT_NATIVE_ARRAY = new Lookup(MethodHandles.lookup()).findOwnStatic("exportNativeArray", Object.class, NativeArray.class);
-    private static final MethodHandle EXPORT_SCRIPT_OBJECT = new Lookup(MethodHandles.lookup()).findOwnStatic("exportScriptObject", Object.class, ScriptObject.class);
-    private static final MethodHandle IMPORT_RESULT = new Lookup(MethodHandles.lookup()).findOwnStatic("importResult", Object.class, Object.class);
+    private static final MethodHandle EXPORT_ARGUMENT;
+    private static final MethodHandle EXPORT_NATIVE_ARRAY;
+    private static final MethodHandle EXPORT_SCRIPT_OBJECT;
+    private static final MethodHandle IMPORT_RESULT;
+    private static final MethodHandle FILTER_CONSSTRING;
+
+    static {
+        final Lookup lookup  = new Lookup(MethodHandles.lookup());
+        EXPORT_ARGUMENT      = lookup.findOwnStatic("exportArgument", Object.class, Object.class);
+        EXPORT_NATIVE_ARRAY  = lookup.findOwnStatic("exportNativeArray", Object.class, NativeArray.class);
+        EXPORT_SCRIPT_OBJECT = lookup.findOwnStatic("exportScriptObject", Object.class, ScriptObject.class);
+        IMPORT_RESULT        = lookup.findOwnStatic("importResult", Object.class, Object.class);
+        FILTER_CONSSTRING    = lookup.findOwnStatic("consStringFilter", Object.class, Object.class);
+    }
+
+    // cache of @FunctionalInterface method of implementor classes
+    private static final ClassValue<Method> FUNCTIONAL_IFACE_METHOD = new ClassValue<Method>() {
+        @Override
+        protected Method computeValue(final Class<?> type) {
+            return findFunctionalInterfaceMethod(type);
+        }
+    };
 
     private final BeansLinker beansLinker = new BeansLinker();
 
     @Override
     public GuardedInvocation getGuardedInvocation(final LinkRequest linkRequest, final LinkerServices linkerServices) throws Exception {
+        final Object self = linkRequest.getReceiver();
+        final CallSiteDescriptor desc = linkRequest.getCallSiteDescriptor();
+        if (self instanceof ConsString) {
+            // In order to treat ConsString like a java.lang.String we need a link request with a string receiver.
+            final Object[] arguments = linkRequest.getArguments();
+            arguments[0] = "";
+            final LinkRequest forgedLinkRequest = linkRequest.replaceArguments(desc, arguments);
+            final GuardedInvocation invocation = getGuardedInvocation(beansLinker, forgedLinkRequest, linkerServices);
+            // If an invocation is found we add a filter that makes it work for both Strings and ConsStrings.
+            return invocation == null ? null : invocation.filterArguments(0, FILTER_CONSSTRING);
+        }
+
+        if (self != null && "call".equals(desc.getNameToken(CallSiteDescriptor.OPERATOR))) {
+            // Support dyn:call on any object that supports some @FunctionalInterface
+            // annotated interface. This way Java method, constructor references or
+            // implementations of java.util.function.* interfaces can be called as though
+            // those are script functions.
+            final Method m = getFunctionalInterfaceMethod(self.getClass());
+            if (m != null) {
+                final MethodType callType = desc.getMethodType();
+                // 'callee' and 'thiz' passed from script + actual arguments
+                if (callType.parameterCount() != m.getParameterCount() + 2) {
+                    throw typeError("no.method.matches.args", ScriptRuntime.safeToString(self));
+                }
+                return new GuardedInvocation(
+                        // drop 'thiz' passed from the script.
+                        MH.dropArguments(desc.getLookup().unreflect(m), 1, callType.parameterType(1)),
+                        Guards.getInstanceOfGuard(m.getDeclaringClass())).asTypeSafeReturn(
+                                new NashornBeansLinkerServices(linkerServices), callType);
+            }
+        }
         return getGuardedInvocation(beansLinker, linkRequest, linkerServices);
     }
 
@@ -111,6 +169,43 @@ public class NashornBeansLinker implements GuardingDynamicLinker {
     @SuppressWarnings("unused")
     private static Object importResult(final Object arg) {
         return ScriptUtils.unwrap(arg);
+    }
+
+    @SuppressWarnings("unused")
+    private static Object consStringFilter(final Object arg) {
+        return arg instanceof ConsString ? arg.toString() : arg;
+    }
+
+    private static Method findFunctionalInterfaceMethod(final Class<?> clazz) {
+        if (clazz == null) {
+            return null;
+        }
+
+        for (final Class<?> iface : clazz.getInterfaces()) {
+            // check accessiblity up-front
+            if (! Context.isAccessibleClass(iface)) {
+                continue;
+            }
+
+            // check for @FunctionalInterface
+            if (iface.isAnnotationPresent(FunctionalInterface.class)) {
+                // return the first abstract method
+                for (final Method m : iface.getMethods()) {
+                    if (Modifier.isAbstract(m.getModifiers())) {
+                        return m;
+                    }
+                }
+            }
+        }
+
+        // did not find here, try super class
+        return findFunctionalInterfaceMethod(clazz.getSuperclass());
+    }
+
+    // Returns @FunctionalInterface annotated interface's single abstract
+    // method. If not found, returns null.
+    static Method getFunctionalInterfaceMethod(final Class<?> clazz) {
+        return FUNCTIONAL_IFACE_METHOD.get(clazz);
     }
 
     private static class NashornBeansLinkerServices implements LinkerServices {

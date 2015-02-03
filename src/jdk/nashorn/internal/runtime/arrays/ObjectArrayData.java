@@ -26,7 +26,6 @@
 package jdk.nashorn.internal.runtime.arrays;
 
 import static jdk.nashorn.internal.codegen.CompilerConstants.specialCall;
-
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.util.Arrays;
@@ -37,7 +36,7 @@ import jdk.nashorn.internal.runtime.ScriptRuntime;
  * Implementation of {@link ArrayData} as soon as an Object has been
  * written to the array
  */
-final class ObjectArrayData extends ContinuousArrayData {
+final class ObjectArrayData extends ContinuousArrayData implements AnyElements {
 
     /**
      * The wrapped array
@@ -49,29 +48,44 @@ final class ObjectArrayData extends ContinuousArrayData {
      * @param array an int array
      * @param length a length, not necessarily array.length
      */
-    ObjectArrayData(final Object array[], final int length) {
+    ObjectArrayData(final Object[] array, final int length) {
         super(length);
         assert array.length >= length;
         this.array  = array;
     }
 
     @Override
-    public Class<?> getElementType() {
+    public final Class<?> getElementType() {
         return Object.class;
     }
 
     @Override
-    public ArrayData copy() {
-        return new ObjectArrayData(array.clone(), (int)length);
+    public final Class<?> getBoxedElementType() {
+        return getElementType();
+    }
+
+    @Override
+    public final int getElementWeight() {
+        return 4;
+    }
+
+    @Override
+    public final ContinuousArrayData widest(final ContinuousArrayData otherData) {
+        return otherData instanceof NumericElements ? this : otherData;
+    }
+
+    @Override
+    public ObjectArrayData copy() {
+        return new ObjectArrayData(array.clone(), (int)length());
     }
 
     @Override
     public Object[] asObjectArray() {
-        return array.length == length ? array.clone() : asObjectArrayCopy();
+        return array.length == length() ? array.clone() : asObjectArrayCopy();
     }
 
     private Object[] asObjectArrayCopy() {
-        final long len = length;
+        final long len = length();
         assert len <= Integer.MAX_VALUE;
         final Object[] copy = new Object[(int)len];
         System.arraycopy(array, 0, copy, 0, (int)len);
@@ -79,7 +93,7 @@ final class ObjectArrayData extends ContinuousArrayData {
     }
 
     @Override
-    public ArrayData convert(final Class<?> type) {
+    public ObjectArrayData convert(final Class<?> type) {
         return this;
     }
 
@@ -90,7 +104,7 @@ final class ObjectArrayData extends ContinuousArrayData {
 
     @Override
     public ArrayData shiftRight(final int by) {
-        final ArrayData newData = ensure(by + length - 1);
+        final ArrayData newData = ensure(by + length() - 1);
         if (newData != this) {
             newData.shiftRight(by);
             return newData;
@@ -122,28 +136,28 @@ final class ObjectArrayData extends ContinuousArrayData {
     @Override
     public ArrayData set(final int index, final Object value, final boolean strict) {
         array[index] = value;
-        setLength(Math.max(index + 1, length));
+        setLength(Math.max(index + 1, length()));
         return this;
     }
 
     @Override
     public ArrayData set(final int index, final int value, final boolean strict) {
         array[index] = value;
-        setLength(Math.max(index + 1, length));
+        setLength(Math.max(index + 1, length()));
         return this;
     }
 
     @Override
     public ArrayData set(final int index, final long value, final boolean strict) {
         array[index] = value;
-        setLength(Math.max(index + 1, length));
+        setLength(Math.max(index + 1, length()));
         return this;
     }
 
     @Override
     public ArrayData set(final int index, final double value, final boolean strict) {
         array[index] = value;
-        setLength(Math.max(index + 1, length));
+        setLength(Math.max(index + 1, length()));
         return this;
     }
 
@@ -216,7 +230,7 @@ final class ObjectArrayData extends ContinuousArrayData {
 
     @Override
     public boolean has(final int index) {
-        return 0 <= index && index < length;
+        return 0 <= index && index < length();
     }
 
     @Override
@@ -248,20 +262,20 @@ final class ObjectArrayData extends ContinuousArrayData {
 
     @Override
     public long fastPush(final Object arg) {
-        final int len = (int)length;
+        final int len = (int)length();
         if (len == array.length) {
             array = Arrays.copyOf(array, nextSize(len));
         }
         array[len] = arg;
-        return ++length;
+        return increaseLength();
     }
 
     @Override
     public Object fastPopObject() {
-        if (length == 0) {
+        if (length() == 0) {
             return ScriptRuntime.UNDEFINED;
         }
-        final int newLength = (int)--length;
+        final int newLength = (int)decreaseLength();
         final Object elem = array[newLength];
         array[newLength] = ScriptRuntime.EMPTY;
         return elem;
@@ -269,11 +283,11 @@ final class ObjectArrayData extends ContinuousArrayData {
 
     @Override
     public Object pop() {
-        if (length == 0) {
+        if (length() == 0) {
             return ScriptRuntime.UNDEFINED;
         }
 
-        final int newLength = (int)length - 1;
+        final int newLength = (int)length() - 1;
         final Object elem = array[newLength];
         setEmpty(newLength);
         setLength(newLength);
@@ -282,14 +296,14 @@ final class ObjectArrayData extends ContinuousArrayData {
 
     @Override
     public ArrayData slice(final long from, final long to) {
-        final long start     = from < 0 ? from + length : from;
+        final long start     = from < 0 ? from + length() : from;
         final long newLength = to - start;
         return new ObjectArrayData(Arrays.copyOfRange(array, (int)from, (int)to), (int)newLength);
     }
 
     @Override
     public ArrayData push(final boolean strict, final Object item) {
-        final long      len     = length;
+        final long      len     = length();
         final ArrayData newData = ensure(len);
         if (newData == this) {
             array[(int)len] = item;
@@ -300,7 +314,7 @@ final class ObjectArrayData extends ContinuousArrayData {
 
     @Override
     public ArrayData fastSplice(final int start, final int removed, final int added) throws UnsupportedOperationException {
-        final long oldLength = length;
+        final long oldLength = length();
         final long newLength = oldLength - removed + added;
         if (newLength > SparseArrayData.MAX_DENSE_LENGTH && newLength > array.length) {
             throw new UnsupportedOperationException();
@@ -324,5 +338,27 @@ final class ObjectArrayData extends ContinuousArrayData {
         }
 
         return returnValue;
+    }
+
+    @Override
+    public ContinuousArrayData fastConcat(final ContinuousArrayData otherData) {
+        final int   otherLength = (int)otherData.length();
+        final int   thisLength  = (int)length();
+        assert otherLength > 0 && thisLength > 0;
+
+        final Object[] otherArray = ((ObjectArrayData)otherData).array;
+        final int      newLength  = otherLength + thisLength;
+        final Object[] newArray   = new Object[ArrayData.alignUp(newLength)];
+
+        System.arraycopy(array, 0, newArray, 0, thisLength);
+        System.arraycopy(otherArray, 0, newArray, thisLength, otherLength);
+
+        return new ObjectArrayData(newArray, newLength);
+    }
+
+    @Override
+    public String toString() {
+        assert length() <= array.length : length() + " > " + array.length;
+        return getClass().getSimpleName() + ':' + Arrays.toString(Arrays.copyOf(array, (int)length()));
     }
 }

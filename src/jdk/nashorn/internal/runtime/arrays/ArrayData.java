@@ -28,7 +28,11 @@ package jdk.nashorn.internal.runtime.arrays;
 import static jdk.nashorn.internal.codegen.CompilerConstants.staticCall;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import jdk.internal.dynalink.CallSiteDescriptor;
 import jdk.internal.dynalink.linker.GuardedInvocation;
 import jdk.internal.dynalink.linker.LinkRequest;
@@ -37,6 +41,7 @@ import jdk.nashorn.internal.codegen.types.Type;
 import jdk.nashorn.internal.objects.Global;
 import jdk.nashorn.internal.runtime.JSType;
 import jdk.nashorn.internal.runtime.PropertyDescriptor;
+import jdk.nashorn.internal.runtime.ScriptRuntime;
 import jdk.nashorn.internal.runtime.UnwarrantedOptimismException;
 
 /**
@@ -49,21 +54,196 @@ public abstract class ArrayData {
     /** Mask for getting a chunk */
     protected static final int CHUNK_MASK = CHUNK_SIZE - 1;
 
-    /**
-     * Immutable empty array to get ScriptObjects started.
-     */
-    public static final ArrayData EMPTY_ARRAY = new NoTypeArrayData();
+    /** Untouched data - still link callsites as IntArrayData, but expands to
+     *  a proper ArrayData when we try to write to it */
+    public static final ArrayData EMPTY_ARRAY = new UntouchedArrayData();
 
     /**
      * Length of the array data. Not necessarily length of the wrapped array.
+     * This is private to ensure that no one in a subclass is able to touch the length
+     * without going through {@link #setLength}. This is used to implement
+     * {@link LengthNotWritableFilter}s, ensuring that there are no ways past
+     * a {@link #setLength} function replaced by a nop
      */
-    protected long length;
+    private long length;
 
     /**
      * Method handle to throw an {@link UnwarrantedOptimismException} when getting an element
      * of the wrong type
      */
     protected static final CompilerConstants.Call THROW_UNWARRANTED = staticCall(MethodHandles.lookup(), ArrayData.class, "throwUnwarranted", void.class, ArrayData.class, int.class, int.class);
+
+    /**
+     * Immutable empty array to get ScriptObjects started.
+     * Use the same array and convert it to mutable as soon as it is modified
+     */
+    private static class UntouchedArrayData extends ContinuousArrayData {
+        private UntouchedArrayData() {
+            super(0);
+        }
+
+        private ArrayData toRealArrayData() {
+            return toRealArrayData(0);
+        }
+
+        private ArrayData toRealArrayData(final int index) {
+            final IntArrayData newData = new IntArrayData(index + 1);
+            if (index == 0) {
+                return newData;
+            }
+            return new DeletedRangeArrayFilter(newData, 0, index);
+        }
+
+        @Override
+        public ContinuousArrayData copy() {
+            assert length() == 0;
+            return this;
+        }
+
+        @Override
+        public Object asArrayOfType(final Class<?> componentType) {
+            return Array.newInstance(componentType, 0);
+        }
+
+        @Override
+        public Object[] asObjectArray() {
+            return ScriptRuntime.EMPTY_ARRAY;
+        }
+
+        @Override
+        public ArrayData ensure(final long safeIndex) {
+            if (safeIndex > 0L) {
+                if (safeIndex >= SparseArrayData.MAX_DENSE_LENGTH) {
+                    return new SparseArrayData(this, safeIndex + 1);
+                }
+                //known to fit in int
+                return toRealArrayData((int)safeIndex).ensure(safeIndex);
+           }
+           return this;
+        }
+
+        @Override
+        public ArrayData convert(final Class<?> type) {
+            return toRealArrayData(0).convert(type);
+        }
+
+        @Override
+        public ArrayData delete(final int index) {
+            return new DeletedRangeArrayFilter(this, index, index);
+        }
+
+        @Override
+        public ArrayData delete(final long fromIndex, final long toIndex) {
+            return new DeletedRangeArrayFilter(this, fromIndex, toIndex);
+        }
+
+        @Override
+        public void shiftLeft(final int by) {
+            //nop, always empty or we wouldn't be of this class
+        }
+
+        @Override
+        public ArrayData shiftRight(final int by) {
+            return this; //always empty or we wouldn't be of this class
+        }
+
+        @Override
+        public ArrayData shrink(final long newLength) {
+            return this;
+        }
+
+        @Override
+        public ArrayData set(final int index, final Object value, final boolean strict) {
+            return toRealArrayData(index).set(index, value, strict);
+        }
+
+        @Override
+        public ArrayData set(final int index, final int value, final boolean strict) {
+            return toRealArrayData(index).set(index, value, strict);
+        }
+
+        @Override
+        public ArrayData set(final int index, final long value, final boolean strict) {
+            return toRealArrayData(index).set(index, value, strict);
+        }
+
+        @Override
+        public ArrayData set(final int index, final double value, final boolean strict) {
+            return toRealArrayData(index).set(index, value, strict);
+        }
+
+        @Override
+        public int getInt(final int index) {
+            throw new ArrayIndexOutOfBoundsException(index); //empty
+        }
+
+        @Override
+        public long getLong(final int index) {
+            throw new ArrayIndexOutOfBoundsException(index); //empty
+        }
+
+        @Override
+        public double getDouble(final int index) {
+            throw new ArrayIndexOutOfBoundsException(index); //empty
+        }
+
+        @Override
+        public Object getObject(final int index) {
+            throw new ArrayIndexOutOfBoundsException(index); //empty
+        }
+
+        @Override
+        public boolean has(final int index) {
+            return false; //empty
+        }
+
+        @Override
+        public Object pop() {
+            return ScriptRuntime.UNDEFINED;
+        }
+
+        @Override
+        public ArrayData push(final boolean strict, final Object item) {
+            return toRealArrayData().push(strict, item);
+        }
+
+        @Override
+        public ArrayData slice(final long from, final long to) {
+            return this; //empty
+        }
+
+        @Override
+        public ContinuousArrayData fastConcat(final ContinuousArrayData otherData) {
+            return otherData.copy();
+        }
+
+        //no need to override fastPopInt, as the default behavior is to throw classcast exception so we
+        //can relink and return an undefined, this is the IntArrayData default behavior
+        @Override
+        public String toString() {
+            return getClass().getSimpleName();
+        }
+
+        @Override
+        public MethodHandle getElementGetter(final Class<?> returnType, final int programPoint) {
+            return null;
+        }
+
+        @Override
+        public MethodHandle getElementSetter(final Class<?> elementType) {
+            return null;
+        }
+
+        @Override
+        public Class<?> getElementType() {
+            return int.class;
+        }
+
+        @Override
+        public Class<?> getBoxedElementType() {
+            return Integer.class;
+        }
+    }
 
     /**
      * Constructor
@@ -77,7 +257,7 @@ public abstract class ArrayData {
      * Factory method for unspecified array - start as int
      * @return ArrayData
      */
-    public static ArrayData initialArray() {
+    public final static ArrayData initialArray() {
         return new IntArrayData();
     }
 
@@ -92,24 +272,13 @@ public abstract class ArrayData {
         throw new UnwarrantedOptimismException(data.getObject(index), programPoint);
     }
 
-    private static int alignUp(final int size) {
+    /**
+     * Align an array size up to the nearest array chunk size
+     * @param size size required
+     * @return size given, always >= size
+     */
+    protected final static int alignUp(final int size) {
         return size + CHUNK_SIZE - 1 & ~(CHUNK_SIZE - 1);
-    }
-
-    /**
-     * Generic invalidation hook for script object to have call sites to this array indexing
-     * relinked, e.g. when a native array is marked as non extensible
-     */
-    public void invalidateGetters() {
-        //subclass responsibility
-    }
-
-    /**
-     * Generic invalidation hook for script object to have call sites to this array indexing
-     * relinked, e.g. when a native array is marked as non extensible
-     */
-    public void invalidateSetters() {
-        //subclass responsibility
     }
 
     /**
@@ -118,7 +287,7 @@ public abstract class ArrayData {
      * @param length the initial length
      * @return ArrayData
      */
-    public static ArrayData allocate(final int length) {
+    public static final ArrayData allocate(final int length) {
         if (length == 0) {
             return new IntArrayData();
         } else if (length >= SparseArrayData.MAX_DENSE_LENGTH) {
@@ -134,7 +303,7 @@ public abstract class ArrayData {
      * @param  array the array
      * @return ArrayData wrapping this array
      */
-    public static ArrayData allocate(final Object array) {
+    public static final ArrayData allocate(final Object array) {
         final Class<?> clazz = array.getClass();
 
         if (clazz == int[].class) {
@@ -154,7 +323,7 @@ public abstract class ArrayData {
      * @param array the array to use for initial elements
      * @return the ArrayData
      */
-    public static ArrayData allocate(final int[] array) {
+    public static final ArrayData allocate(final int[] array) {
          return new IntArrayData(array, array.length);
     }
 
@@ -164,7 +333,7 @@ public abstract class ArrayData {
      * @param array the array to use for initial elements
      * @return the ArrayData
      */
-    public static ArrayData allocate(final long[] array) {
+    public static final ArrayData allocate(final long[] array) {
         return new LongArrayData(array, array.length);
     }
 
@@ -174,7 +343,7 @@ public abstract class ArrayData {
      * @param array the array to use for initial elements
      * @return the ArrayData
      */
-    public static ArrayData allocate(final double[] array) {
+    public static final ArrayData allocate(final double[] array) {
         return new NumberArrayData(array, array.length);
     }
 
@@ -184,7 +353,7 @@ public abstract class ArrayData {
      * @param array the array to use for initial elements
      * @return the ArrayData
      */
-    public static ArrayData allocate(final Object[] array) {
+    public static final ArrayData allocate(final Object[] array) {
         return new ObjectArrayData(array, array.length);
     }
 
@@ -194,7 +363,7 @@ public abstract class ArrayData {
      * @param buf the nio ByteBuffer to wrap
      * @return the ArrayData
      */
-    public static ArrayData allocate(final ByteBuffer buf) {
+    public static final ArrayData allocate(final ByteBuffer buf) {
         return new ByteBufferArrayData(buf);
     }
 
@@ -204,7 +373,7 @@ public abstract class ArrayData {
      * @param underlying  the underlying ArrayData to wrap in the freeze filter
      * @return the frozen ArrayData
      */
-    public static ArrayData freeze(final ArrayData underlying) {
+    public static final ArrayData freeze(final ArrayData underlying) {
         return new FrozenArrayFilter(underlying);
     }
 
@@ -214,8 +383,28 @@ public abstract class ArrayData {
      * @param underlying  the underlying ArrayData to wrap in the seal filter
      * @return the sealed ArrayData
      */
-    public static ArrayData seal(final ArrayData underlying) {
+    public static final ArrayData seal(final ArrayData underlying) {
         return new SealedArrayFilter(underlying);
+    }
+
+    /**
+     * Prevent this array from being extended
+     *
+     * @param  underlying the underlying ArrayData to wrap in the non extensible filter
+     * @return new array data, filtered
+     */
+    public static final ArrayData preventExtension(final ArrayData underlying) {
+        return new NonExtensibleArrayFilter(underlying);
+    }
+
+    /**
+     * Prevent this array from having its length reset
+     *
+     * @param underlying the underlying ArrayDAta to wrap in the non extensible filter
+     * @return new array data, filtered
+     */
+    public static final ArrayData setIsLengthNotWritable(final ArrayData underlying) {
+        return new LengthNotWritableFilter(underlying);
     }
 
     /**
@@ -271,6 +460,22 @@ public abstract class ArrayData {
     }
 
     /**
+     * Increase length by 1
+     * @return the new length, not the old one (i.e. pre-increment)
+     */
+    protected final long increaseLength() {
+        return ++this.length;
+    }
+
+    /**
+     * Decrease length by 1.
+     * @return the new length, not the old one (i.e. pre-decrement)
+     */
+    protected final long decreaseLength() {
+        return --this.length;
+    }
+
+    /**
      * Shift the array data left
      *
      * TODO: explore start at an index and not at zero, to make these operations
@@ -279,7 +484,7 @@ public abstract class ArrayData {
      *
      * @param by offset to shift
      */
-    public abstract void shiftLeft(int by);
+    public abstract void shiftLeft(final int by);
 
     /**
      * Shift the array right
@@ -288,7 +493,7 @@ public abstract class ArrayData {
 
      * @return New arraydata (or same)
      */
-    public abstract ArrayData shiftRight(int by);
+    public abstract ArrayData shiftRight(final int by);
 
     /**
      * Ensure that the given index exists and won't fail subsequent
@@ -296,7 +501,7 @@ public abstract class ArrayData {
      * @param safeIndex the index to ensure wont go out of bounds
      * @return new array data (or same)
      */
-    public abstract ArrayData ensure(long safeIndex);
+    public abstract ArrayData ensure(final long safeIndex);
 
     /**
      * Shrink the array to a new length, may or may not retain the
@@ -306,7 +511,7 @@ public abstract class ArrayData {
      *
      * @return new array data (or same)
      */
-    public abstract ArrayData shrink(long newLength);
+    public abstract ArrayData shrink(final long newLength);
 
     /**
      * Set an object value at a given index
@@ -316,7 +521,7 @@ public abstract class ArrayData {
      * @param strict are we in strict mode
      * @return new array data (or same)
      */
-    public abstract ArrayData set(int index, Object value, boolean strict);
+    public abstract ArrayData set(final int index, final Object value, final boolean strict);
 
     /**
      * Set an int value at a given index
@@ -326,7 +531,7 @@ public abstract class ArrayData {
      * @param strict are we in strict mode
      * @return new array data (or same)
      */
-    public abstract ArrayData set(int index, int value, boolean strict);
+    public abstract ArrayData set(final int index, final int value, final boolean strict);
 
     /**
      * Set a long value at a given index
@@ -336,7 +541,7 @@ public abstract class ArrayData {
      * @param strict are we in strict mode
      * @return new array data (or same)
      */
-    public abstract ArrayData set(int index, long value, boolean strict);
+    public abstract ArrayData set(final int index, final long value, final boolean strict);
 
     /**
      * Set an double value at a given index
@@ -346,7 +551,7 @@ public abstract class ArrayData {
      * @param strict are we in strict mode
      * @return new array data (or same)
      */
-    public abstract ArrayData set(int index, double value, boolean strict);
+    public abstract ArrayData set(final int index, final double value, final boolean strict);
 
     /**
      * Set an empty value at a given index. Should only affect Object array.
@@ -377,7 +582,7 @@ public abstract class ArrayData {
      * @param index the index
      * @return the value
      */
-    public abstract int getInt(int index);
+    public abstract int getInt(final int index);
 
     /**
      * Returns the optimistic type of this array data. Basically, when an array data object needs to throw an
@@ -406,7 +611,7 @@ public abstract class ArrayData {
      * @param index the index
      * @return the value
      */
-    public abstract long getLong(int index);
+    public abstract long getLong(final int index);
 
     /**
      * Get optimistic long - default is that it's impossible. Overridden
@@ -426,7 +631,7 @@ public abstract class ArrayData {
      * @param index the index
      * @return the value
      */
-    public abstract double getDouble(int index);
+    public abstract double getDouble(final int index);
 
     /**
      * Get optimistic double - default is that it's impossible. Overridden
@@ -446,14 +651,14 @@ public abstract class ArrayData {
      * @param index the index
      * @return the value
      */
-    public abstract Object getObject(int index);
+    public abstract Object getObject(final int index);
 
     /**
      * Tests to see if an entry exists (avoids boxing.)
      * @param index the index
      * @return true if entry exists
      */
-    public abstract boolean has(int index);
+    public abstract boolean has(final int index);
 
     /**
      * Returns if element at specific index can be deleted or not.
@@ -499,7 +704,7 @@ public abstract class ArrayData {
      * @param index the index
      * @return new array data (or same)
      */
-    public abstract ArrayData delete(int index);
+    public abstract ArrayData delete(final int index);
 
     /**
      * Delete a given range from this array;
@@ -509,7 +714,7 @@ public abstract class ArrayData {
      *
      * @return new ArrayData after deletion
      */
-    public abstract ArrayData delete(long fromIndex, long toIndex);
+    public abstract ArrayData delete(final long fromIndex, final long toIndex);
 
     /**
      * Convert the ArrayData to one with a different element type
@@ -519,7 +724,7 @@ public abstract class ArrayData {
      * @param type new element type
      * @return new array data
      */
-    public abstract ArrayData convert(Class<?> type);
+    public abstract ArrayData convert(final Class<?> type);
 
     /**
      * Push an array of items to the end of the array
@@ -603,7 +808,7 @@ public abstract class ArrayData {
      * @param to   end index + 1
      * @return new array data
      */
-    public abstract ArrayData slice(long from, long to);
+    public abstract ArrayData slice(final long from, final long to);
 
     /**
      * Fast splice operation. This just modifies the array according to the number of
@@ -648,6 +853,34 @@ public abstract class ArrayData {
     }
 
     /**
+     * Return a list of keys in the array for the iterators
+     * @return iterator key list
+     */
+    protected List<Long> computeIteratorKeys() {
+        final List<Long> keys = new ArrayList<>();
+
+        final long len = length();
+        for (long i = 0L; i < len; i = nextIndex(i)) {
+            if (has((int)i)) {
+                keys.add(i);
+            }
+        }
+
+        return keys;
+    }
+
+    /**
+     * Return an iterator that goes through all indexes of elements
+     * in this array. This includes those after array.length if
+     * they exist
+     *
+     * @return iterator
+     */
+    public Iterator<Long> indexIterator() {
+        return computeIteratorKeys().iterator();
+    }
+
+    /**
      * Exponential growth function for array size when in
      * need of resizing.
      *
@@ -666,7 +899,7 @@ public abstract class ArrayData {
      *
      * @return the next index
      */
-    public long nextIndex(final long index) {
+    long nextIndex(final long index) {
         return index + 1;
     }
 
@@ -728,5 +961,4 @@ public abstract class ArrayData {
     public GuardedInvocation findFastSetIndexMethod(final Class<? extends ArrayData> clazz, final CallSiteDescriptor desc, final LinkRequest request) { // array, index, value
         return null;
     }
-
 }

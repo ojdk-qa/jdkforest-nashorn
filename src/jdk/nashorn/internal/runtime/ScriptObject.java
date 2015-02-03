@@ -46,7 +46,10 @@ import static jdk.nashorn.internal.runtime.UnwarrantedOptimismException.INVALID_
 import static jdk.nashorn.internal.runtime.UnwarrantedOptimismException.isValid;
 import static jdk.nashorn.internal.runtime.arrays.ArrayIndex.getArrayIndex;
 import static jdk.nashorn.internal.runtime.arrays.ArrayIndex.isValidArrayIndex;
+import static jdk.nashorn.internal.runtime.linker.NashornCallSiteDescriptor.isScopeFlag;
+import static jdk.nashorn.internal.runtime.linker.NashornCallSiteDescriptor.isStrictFlag;
 import static jdk.nashorn.internal.runtime.linker.NashornGuards.explicitInstanceOfCheck;
+
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -97,7 +100,7 @@ import jdk.nashorn.internal.runtime.linker.NashornGuards;
  * </ul>
  */
 
-public abstract class ScriptObject implements PropertyAccess {
+public abstract class ScriptObject implements PropertyAccess, Cloneable {
     /** __proto__ special property name inside object literals. ES6 draft. */
     public static final String PROTO_PROPERTY_NAME   = "__proto__";
 
@@ -303,29 +306,44 @@ public abstract class ScriptObject implements PropertyAccess {
         PropertyMap newMap = this.getMap();
 
         for (final Property property : properties) {
-            final String key = property.getKey();
-            final Property oldProp = newMap.findProperty(key);
-            if (oldProp == null) {
-                if (property instanceof UserAccessorProperty) {
-                    // Note: we copy accessor functions to this object which is semantically different from binding.
-                    final UserAccessorProperty prop = this.newUserAccessors(key, property.getFlags(), property.getGetterFunction(source), property.getSetterFunction(source));
-                    newMap = newMap.addPropertyNoHistory(prop);
-                } else {
-                    newMap = newMap.addPropertyBind((AccessorProperty)property, source);
-                }
-            } else {
-                // See ECMA section 10.5 Declaration Binding Instantiation
-                // step 5 processing each function declaration.
-                if (property.isFunctionDeclaration() && !oldProp.isConfigurable()) {
-                     if (oldProp instanceof UserAccessorProperty ||
-                         !(oldProp.isWritable() && oldProp.isEnumerable())) {
-                         throw typeError("cant.redefine.property", key, ScriptRuntime.safeToString(this));
-                     }
-                }
-            }
+            newMap = addBoundProperty(newMap, source, property);
         }
 
         this.setMap(newMap);
+    }
+
+    /**
+     * Add a bound property from {@code source}, using the interim property map {@code propMap}, and return the
+     * new interim property map.
+     *
+     * @param propMap the property map
+     * @param source the source object
+     * @param property the property to be added
+     * @return the new property map
+     */
+    protected PropertyMap addBoundProperty(final PropertyMap propMap, final ScriptObject source, final Property property) {
+        PropertyMap newMap = propMap;
+        final String key = property.getKey();
+        final Property oldProp = newMap.findProperty(key);
+        if (oldProp == null) {
+            if (property instanceof UserAccessorProperty) {
+                // Note: we copy accessor functions to this object which is semantically different from binding.
+                final UserAccessorProperty prop = this.newUserAccessors(key, property.getFlags(), property.getGetterFunction(source), property.getSetterFunction(source));
+                newMap = newMap.addPropertyNoHistory(prop);
+            } else {
+                newMap = newMap.addPropertyBind((AccessorProperty)property, source);
+            }
+        } else {
+            // See ECMA section 10.5 Declaration Binding Instantiation
+            // step 5 processing each function declaration.
+            if (property.isFunctionDeclaration() && !oldProp.isConfigurable()) {
+                if (oldProp instanceof UserAccessorProperty ||
+                        !(oldProp.isWritable() && oldProp.isEnumerable())) {
+                    throw typeError("cant.redefine.property", key, ScriptRuntime.safeToString(this));
+                }
+            }
+        }
+        return newMap;
     }
 
     /**
@@ -510,6 +528,17 @@ public abstract class ScriptObject implements PropertyAccess {
     }
 
     /**
+     * Invalidate any existing global constant method handles that may exist for {@code key}.
+     * @param key the property name
+     */
+    protected void invalidateGlobalConstant(final String key) {
+        final GlobalConstants globalConstants = getGlobalConstants();
+        if (globalConstants != null) {
+            globalConstants.delete(key);
+        }
+    }
+
+    /**
      * ECMA 8.12.9 [[DefineOwnProperty]] (P, Desc, Throw)
      *
      * @param key the property key
@@ -523,6 +552,8 @@ public abstract class ScriptObject implements PropertyAccess {
         final PropertyDescriptor desc    = toPropertyDescriptor(global, propertyDesc);
         final Object             current = getOwnPropertyDescriptor(key);
         final String             name    = JSType.toString(key);
+
+        invalidateGlobalConstant(key);
 
         if (current == UNDEFINED) {
             if (isExtensible()) {
@@ -692,8 +723,7 @@ public abstract class ScriptObject implements PropertyAccess {
         assert isValidArrayIndex(index) : "invalid array index";
         final long longIndex = ArrayIndex.toLongIndex(index);
         doesNotHaveEnsureDelete(longIndex, getArray().length(), false);
-        setArray(getArray().ensure(longIndex));
-        setArray(getArray().set(index, value, false));
+        setArray(getArray().ensure(longIndex).set(index,value, false));
     }
 
     private void checkIntegerKey(final String key) {
@@ -923,7 +953,8 @@ public abstract class ScriptObject implements PropertyAccess {
                 if (property instanceof UserAccessorProperty) {
                     ((UserAccessorProperty)property).setAccessors(this, getMap(), null);
                 }
-                Global.getConstants().delete(property.getKey());
+
+                invalidateGlobalConstant(property.getKey());
                 return true;
             }
         }
@@ -970,7 +1001,7 @@ public abstract class ScriptObject implements PropertyAccess {
             final UserAccessorProperty uc = (UserAccessorProperty)oldProperty;
             final int slot = uc.getSlot();
 
-            assert uc.getCurrentType() == Object.class;
+            assert uc.getLocalType() == Object.class;
             if (slot >= spillLength) {
                 uc.setAccessors(this, getMap(), new UserAccessorProperty.Accessors(getter, setter));
             } else {
@@ -1349,12 +1380,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final PropertyMap  selfMap = this.getMap();
 
         final ArrayData array  = getArray();
-        final long length      = array.length();
 
-        for (long i = 0; i < length; i = array.nextIndex(i)) {
-            if (array.has((int)i)) {
-                keys.add(JSType.toString(i));
-            }
+        for (final Iterator<Long> iter = array.indexIterator(); iter.hasNext(); ) {
+            keys.add(JSType.toString(iter.next().longValue()));
         }
 
         for (final Property property : selfMap.getProperties()) {
@@ -1462,9 +1490,8 @@ public abstract class ScriptObject implements PropertyAccess {
 
         //invalidate any fast array setters
         final ArrayData array = getArray();
-        if (array != null) {
-            array.invalidateSetters();
-        }
+        assert array != null;
+        setArray(ArrayData.preventExtension(array));
         return this;
     }
 
@@ -1514,12 +1541,12 @@ public abstract class ScriptObject implements PropertyAccess {
      *
      * @return {@code true} if 'length' property is non-writable
      */
-    public final boolean isLengthNotWritable() {
+    public boolean isLengthNotWritable() {
         return (flags & IS_LENGTH_NOT_WRITABLE) != 0;
     }
 
     /**
-     * Flag this object as having non-writable length property
+     * Flag this object as having non-writable length property.
      */
     public void setIsLengthNotWritable() {
         flags |= IS_LENGTH_NOT_WRITABLE;
@@ -1974,20 +2001,22 @@ public abstract class ScriptObject implements PropertyAccess {
 
         if (find == null) {
             switch (operator) {
+            case "getElem": // getElem only gets here if element name is constant, so treat it like a property access
             case "getProp":
                 return noSuchProperty(desc, request);
             case "getMethod":
                 return noSuchMethod(desc, request);
-            case "getElem":
-                return createEmptyGetter(desc, explicitInstanceOfCheck, name);
             default:
                 throw new AssertionError(operator); // never invoked with any other operation
             }
         }
 
-        final GuardedInvocation cinv = Global.getConstants().findGetMethod(find, this, desc);
-        if (cinv != null) {
-            return cinv;
+        final GlobalConstants globalConstants = getGlobalConstants();
+        if (globalConstants != null) {
+            final GuardedInvocation cinv = globalConstants.findGetMethod(find, this, desc);
+            if (cinv != null) {
+                return cinv;
+            }
         }
 
         final Class<?> returnType = desc.getMethodType().returnType();
@@ -2174,6 +2203,9 @@ public abstract class ScriptObject implements PropertyAccess {
 
         if (find != null) {
             if (!find.getProperty().isWritable() && !NashornCallSiteDescriptor.isDeclaration(desc)) {
+                if (NashornCallSiteDescriptor.isScope(desc) && find.getProperty().isLexicalBinding()) {
+                    throw typeError("assign.constant", name); // Overwriting ES6 const should throw also in non-strict mode.
+                }
                 // Existing, non-writable property
                 return createEmptySetMethod(desc, explicitInstanceOfCheck, "property.not.writable", true);
             }
@@ -2185,12 +2217,20 @@ public abstract class ScriptObject implements PropertyAccess {
 
         final GuardedInvocation inv = new SetMethodCreator(this, find, desc, request).createGuardedInvocation(findBuiltinSwitchPoint(name));
 
-        final GuardedInvocation cinv = Global.getConstants().findSetMethod(find, this, inv, desc, request);
-        if (cinv != null) {
-            return cinv;
+        final GlobalConstants globalConstants = getGlobalConstants();
+        if (globalConstants != null) {
+            final GuardedInvocation cinv = globalConstants.findSetMethod(find, this, inv, desc, request);
+            if (cinv != null) {
+                return cinv;
+            }
         }
 
         return inv;
+    }
+
+    private GlobalConstants getGlobalConstants() {
+        // Avoid hitting getContext() which might be costly for a non-Global unless needed.
+        return GlobalConstants.GLOBAL_ONLY && !isGlobal() ? null : getContext().getGlobalConstants();
     }
 
     private GuardedInvocation createEmptySetMethod(final CallSiteDescriptor desc, final boolean explicitInstanceOfCheck, final String strictErrorMessage, final boolean canBeFastScope) {
@@ -2292,8 +2332,9 @@ public abstract class ScriptObject implements PropertyAccess {
         }
 
         final ScriptFunction func = (ScriptFunction)value;
-        final Object         thiz = scopeCall && func.isStrict() ? ScriptRuntime.UNDEFINED : this;
+        final Object         thiz = scopeCall && func.isStrict() ? UNDEFINED : this;
         // TODO: It'd be awesome if we could bind "name" without binding "this".
+        // Since we're binding this we must use an identity guard here.
         return new GuardedInvocation(
                 MH.dropArguments(
                         MH.constant(
@@ -2301,9 +2342,9 @@ public abstract class ScriptObject implements PropertyAccess {
                                 func.makeBoundFunction(thiz, new Object[] { name })),
                         0,
                         Object.class),
-                NashornGuards.getMapGuard(getMap(), explicitInstanceOfCheck),
-                (SwitchPoint)null,
-                explicitInstanceOfCheck ? null : ClassCastException.class);
+                NashornGuards.combineGuards(
+                        NashornGuards.getIdentityGuard(this),
+                        NashornGuards.getMapGuard(getMap(), true)));
     }
 
     /**
@@ -2645,20 +2686,22 @@ public abstract class ScriptObject implements PropertyAccess {
       * @param newLength new length to set
       */
     public final void setLength(final long newLength) {
-       final long arrayLength = getArray().length();
-       if (newLength == arrayLength) {
-           return;
-       }
+        ArrayData data = getArray();
+        final long arrayLength = data.length();
+        if (newLength == arrayLength) {
+            return;
+        }
 
-       if (newLength > arrayLength) {
-           setArray(getArray().ensure(newLength - 1));
-            if (getArray().canDelete(arrayLength, newLength - 1, false)) {
-               setArray(getArray().delete(arrayLength, newLength - 1));
-           }
-           return;
-       }
+        if (newLength > arrayLength) {
+            data = data.ensure(newLength - 1);
+            if (data.canDelete(arrayLength, newLength - 1, false)) {
+               data = data.delete(arrayLength, newLength - 1);
+            }
+            setArray(data);
+            return;
+        }
 
-       if (newLength < arrayLength) {
+        if (newLength < arrayLength) {
            long actualLength = newLength;
 
            // Check for numeric keys in property map and delete them or adjust length, depending on whether
@@ -2680,8 +2723,8 @@ public abstract class ScriptObject implements PropertyAccess {
                }
            }
 
-           setArray(getArray().shrink(actualLength));
-           getArray().setLength(actualLength);
+           setArray(data.shrink(actualLength));
+           data.setLength(actualLength);
        }
     }
 
@@ -3065,7 +3108,7 @@ public abstract class ScriptObject implements PropertyAccess {
     private boolean doesNotHaveEnsureLength(final long longIndex, final long oldLength, final int callSiteFlags) {
         if (longIndex >= oldLength) {
             if (!isExtensible()) {
-                if (NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)) {
+                if (isStrictFlag(callSiteFlags)) {
                     throw typeError("object.non.extensible", JSType.toString(longIndex), ScriptRuntime.safeToString(this));
                 }
                 return true;
@@ -3089,7 +3132,7 @@ public abstract class ScriptObject implements PropertyAccess {
         final long oldLength = getArray().length();
         final long longIndex = ArrayIndex.toLongIndex(index);
         if (!doesNotHaveCheckArrayKeys(longIndex, value, callSiteFlags) && !doesNotHaveEnsureLength(longIndex, oldLength, callSiteFlags)) {
-            final boolean strict = NashornCallSiteDescriptor.isStrictFlag(callSiteFlags);
+            final boolean strict = isStrictFlag(callSiteFlags);
             setArray(getArray().set(index, value, strict));
             doesNotHaveEnsureDelete(longIndex, oldLength, strict);
         }
@@ -3099,7 +3142,7 @@ public abstract class ScriptObject implements PropertyAccess {
         final long oldLength = getArray().length();
         final long longIndex = ArrayIndex.toLongIndex(index);
         if (!doesNotHaveCheckArrayKeys(longIndex, value, callSiteFlags) && !doesNotHaveEnsureLength(longIndex, oldLength, callSiteFlags)) {
-            final boolean strict = NashornCallSiteDescriptor.isStrictFlag(callSiteFlags);
+            final boolean strict = isStrictFlag(callSiteFlags);
             setArray(getArray().set(index, value, strict));
             doesNotHaveEnsureDelete(longIndex, oldLength, strict);
         }
@@ -3109,7 +3152,7 @@ public abstract class ScriptObject implements PropertyAccess {
         final long oldLength = getArray().length();
         final long longIndex = ArrayIndex.toLongIndex(index);
         if (!doesNotHaveCheckArrayKeys(longIndex, value, callSiteFlags) && !doesNotHaveEnsureLength(longIndex, oldLength, callSiteFlags)) {
-            final boolean strict = NashornCallSiteDescriptor.isStrictFlag(callSiteFlags);
+            final boolean strict = isStrictFlag(callSiteFlags);
             setArray(getArray().set(index, value, strict));
             doesNotHaveEnsureDelete(longIndex, oldLength, strict);
         }
@@ -3119,7 +3162,7 @@ public abstract class ScriptObject implements PropertyAccess {
         final long oldLength = getArray().length();
         final long longIndex = ArrayIndex.toLongIndex(index);
         if (!doesNotHaveCheckArrayKeys(longIndex, value, callSiteFlags) && !doesNotHaveEnsureLength(longIndex, oldLength, callSiteFlags)) {
-            final boolean strict = NashornCallSiteDescriptor.isStrictFlag(callSiteFlags);
+            final boolean strict = isStrictFlag(callSiteFlags);
             setArray(getArray().set(index, value, strict));
             doesNotHaveEnsureDelete(longIndex, oldLength, strict);
         }
@@ -3137,8 +3180,10 @@ public abstract class ScriptObject implements PropertyAccess {
     public final void setObject(final FindProperty find, final int callSiteFlags, final String key, final Object value) {
         FindProperty f = find;
 
+        invalidateGlobalConstant(key);
+
         if (f != null && f.isInherited() && !(f.getProperty() instanceof UserAccessorProperty)) {
-            final boolean isScope = NashornCallSiteDescriptor.isScopeFlag(callSiteFlags);
+            final boolean isScope = isScopeFlag(callSiteFlags);
             // If the start object of the find is not this object it means the property was found inside a
             // 'with' statement expression (see WithObject.findProperty()). In this case we forward the 'set'
             // to the 'with' object.
@@ -3159,17 +3204,19 @@ public abstract class ScriptObject implements PropertyAccess {
 
         if (f != null) {
             if (!f.getProperty().isWritable()) {
-                if (NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)) {
+                if (isScopeFlag(callSiteFlags) && f.getProperty().isLexicalBinding()) {
+                    throw typeError("assign.constant", key); // Overwriting ES6 const should throw also in non-strict mode.
+                }
+                if (isStrictFlag(callSiteFlags)) {
                     throw typeError("property.not.writable", key, ScriptRuntime.safeToString(this));
                 }
-
                 return;
             }
 
-            f.setValue(value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags));
+            f.setValue(value, isStrictFlag(callSiteFlags));
 
         } else if (!isExtensible()) {
-            if (NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)) {
+            if (isStrictFlag(callSiteFlags)) {
                 throw typeError("object.non.extensible", key, ScriptRuntime.safeToString(this));
             }
         } else {
@@ -3194,8 +3241,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int    index        = getArrayIndex(primitiveKey);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3213,8 +3261,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int    index        = getArrayIndex(primitiveKey);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3232,8 +3281,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int    index        = getArrayIndex(primitiveKey);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3251,8 +3301,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int    index        = getArrayIndex(primitiveKey);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3269,8 +3320,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3287,8 +3339,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3305,8 +3358,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3323,8 +3377,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3341,8 +3396,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3359,8 +3415,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3377,8 +3434,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3395,8 +3453,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3413,7 +3472,8 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
         if (isValidArrayIndex(index)) {
             if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+                final ArrayData data = getArray();
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3429,8 +3489,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3447,8 +3508,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3465,8 +3527,9 @@ public abstract class ScriptObject implements PropertyAccess {
         final int index = getArrayIndex(key);
 
         if (isValidArrayIndex(index)) {
-            if (getArray().has(index)) {
-                setArray(getArray().set(index, value, NashornCallSiteDescriptor.isStrictFlag(callSiteFlags)));
+            final ArrayData data = getArray();
+            if (data.has(index)) {
+                setArray(data.set(index, value, isStrictFlag(callSiteFlags)));
             } else {
                 doesNotHave(index, value, callSiteFlags);
             }
@@ -3557,7 +3620,6 @@ public abstract class ScriptObject implements PropertyAccess {
             }
             return false;
         }
-
         return deleteObject(JSType.toObject(key), strict);
     }
 
@@ -3629,6 +3691,31 @@ public abstract class ScriptObject implements PropertyAccess {
         deleteOwnProperty(prop);
 
         return true;
+    }
+
+    /**
+     * Return a shallow copy of this ScriptObject.
+     * @return a shallow copy.
+     */
+    public final ScriptObject copy() {
+        try {
+            return clone();
+        } catch (final CloneNotSupportedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    protected ScriptObject clone() throws CloneNotSupportedException {
+        final ScriptObject clone = (ScriptObject) super.clone();
+        if (objectSpill != null) {
+            clone.objectSpill = objectSpill.clone();
+            if (primitiveSpill != null) {
+                clone.primitiveSpill = primitiveSpill.clone();
+            }
+        }
+        clone.arrayData = arrayData.copy();
+        return clone;
     }
 
     /**
